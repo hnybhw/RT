@@ -1,7 +1,7 @@
 Attribute VB_Name = "app_00_utils"
 '
 ' ==============================================================================================
-' MODULE NAME     : app_00_utils (FINAL VERSION)
+' MODULE NAME     : app_00_utils
 ' PURPOSE         : 通用工具函数库，为所有模块提供安全、统一的数组检测、范围操作、配置管理、
 '                  Application状态管理、安全数学运算、错误处理包装、路径工具和性能计时功能。
 '                  本模块旨在作为整个项目的"基础设施"，集中处理所有边界检查和防御性编程。
@@ -12,94 +12,96 @@ Attribute VB_Name = "app_00_utils"
 '                 : Microsoft Excel Object Library (Range, Worksheet, Application)
 ' NOTE            : 本模块所有函数均设计为无副作用、可重入、线程安全（在VBA单线程环境下）
 '                 : All functions are designed to be side-effect free, reentrant, and thread-safe
+' VERSION HISTORY : v1.0 - 初始版本，实现核心工具函数
+'                 : v1.1 - 优化数组标准化逻辑，新增SharePoint路径判断，完善性能计时工具，修复SafeExecute重试机制bug
 ' ==============================================================================================
 ' TABLE OF CONTENTS:
 '
 ' SECTION 0: 私有日志辅助函数 / Private Logging Helpers
-'   [f] LogInfo          - 记录信息日志
-'   [f] LogWarn          - 记录警告日志
-'   [f] LogError         - 记录错误日志
-'   [f] LogDebug         - 记录调试日志（仅在DEBUG_MODE下生效）
+'   [f] LogInfo                 - 记录信息日志
+'   [f] LogWarn                 - 记录警告日志
+'   [f] LogError                - 记录错误日志
+'   [f] LogDebug                - 记录调试日志（仅在DEBUG_MODE下生效）
 '
 ' SECTION 1: 模块常量和类型 / Module Constants and Types
-'   [C] MODULE_NAME      - 模块名称常量（用于日志记录）
-'   [C] 配置键常量       - CFG_YEAR_MAX, CFG_MATERIALITY_THRESHOLD, CFG_CHUNK_SIZE,
-'                          CFG_CHUNK_THRESHOLD, CFG_PYTHON_TIMEOUT, CFG_STRICT_LOB_MATCHING
-'   [C] 数组规范常量     - ARRAY_BASE_DEFAULT, ARRAY_MIN_ROWS, ARRAY_MIN_COLS
-'   [C] 安全边界常量     - SAFE_MAX_LONG, SAFE_MAX_ARRAY_ELEMENTS, SAFE_MAX_STRING_LENGTH
-'   [C] 空值/默认值常量  - EMPTY_VALUE, DEFAULT_STRING, DEFAULT_LONG, DEFAULT_DOUBLE, DEFAULT_BOOLEAN
+'   [C] MODULE_NAME             - 模块名称常量（用于日志记录）
+'   [C] 配置键常量              - CFG_YEAR_MAX, CFG_MATERIALITY_THRESHOLD, CFG_CHUNK_SIZE,
+'                                 CFG_CHUNK_THRESHOLD, CFG_PYTHON_TIMEOUT, CFG_STRICT_LOB_MATCHING
+'   [C] 数组规范常量            - ARRAY_BASE_DEFAULT, ARRAY_MIN_ROWS, ARRAY_MIN_COLS
+'   [C] 安全边界常量            - SAFE_MAX_LONG, SAFE_MAX_ARRAY_ELEMENTS, SAFE_MAX_STRING_LENGTH
+'   [C] 空值/默认值常量         - EMPTY_VALUE, DEFAULT_STRING, DEFAULT_LONG, DEFAULT_DOUBLE, DEFAULT_BOOLEAN
 '
 ' SECTION 2: 数组安全检测与标准化 / Array Safety and Normalization
-'   [F] GetArrayInfo           - 安全获取数组维度信息（永不崩溃）
-'   [f] GetArrayDimensions     - 安全获取数组维度数（无硬编码上限）
-'   [F] IsArrayValid           - 统一检测数组是否有效且包含数据
-'   [F] NormalizeTo1Based      - 将任意数组转换为1-based（便于后续处理）
-'   [f] Normalize1DArray       - 标准化一维数组为二维1-based数组（纯循环实现）
-'   [f] Normalize2DArray       - 标准化二维数组为二维1-based数组
-'   [F] EnsureArrayDimensions  - 确保数组至少具有指定维度
-'   [F] SliceArraySafe         - 安全切片（带边界检查）
+'   [F] GetArrayInfo            - 安全获取数组维度信息（永不崩溃）
+'   [f] GetArrayDimensions      - 安全获取数组维度数（无硬编码上限）
+'   [F] IsArrayValid            - 统一检测数组是否有效且包含数据
+'   [F] NormalizeTo1Based       - 将任意数组转换为1-based（便于后续处理）
+'   [f] Normalize1DArray        - 标准化一维数组为二维1-based数组（纯循环实现）
+'   [f] Normalize2DArray        - 标准化二维数组为二维1-based数组
+'   [F] EnsureArrayDimensions   - 确保数组至少具有指定维度
+'   [F] SliceArraySafe          - 安全切片（带边界检查）
+'   [F] SliceArraySafeFull      - 安全切片完整副本（无参数调用）
 '
 ' SECTION 3: 范围/工作表安全操作 / Range and Worksheet Safety
-'   [F] GetNamedRangeSafely    - 安全获取命名范围（带存在性验证）
-'   [F] GetActualDataRange     - 获取工作表的实际数据范围（避免UsedRange陷阱）
-'   [F] IsWorksheetValid       - 检查工作表是否存在且可用
-'   [F] GetLastRowSafely       - 安全获取最后一行的行号
-'   [F] GetLastColSafely       - 安全获取最后一列的列号
+'   [F] GetNamedRangeSafely     - 安全获取命名范围（带存在性验证）
+'   [F] GetActualDataRange      - 获取工作表的实际数据范围（避免UsedRange陷阱）
+'   [F] IsWorksheetValid        - 检查工作表是否存在且可用
+'   [F] GetLastRowSafely        - 安全获取最后一行的行号
+'   [F] GetLastColSafely        - 安全获取最后一列的列号
 '
 ' SECTION 4: 配置管理统一化 / Configuration Management
-'   [F] GetConfigValue         - 统一的配置获取函数（带类型转换和默认值）
-'   [F] SetConfigValue         - 安全设置配置值（带类型验证）
-'   [F] ConfigKeyExists        - 检查配置键是否存在
+'   [F] GetConfigValue          - 统一的配置获取函数（带类型转换和默认值）
+'   [F] SetConfigValue          - 安全设置配置值（带类型验证）
+'   [F] ConfigKeyExists         - 检查配置键是否存在
 '
 ' SECTION 5: Application状态管理 / Application State Management
-'   [F] SaveAppState           - 保存当前Application状态
-'   [S] RestoreAppState        - 恢复Application状态
-'   [F] RunOptimized           - 在优化环境中运行宏（自动恢复）
-'   [f] ApplyOptimizedSettings - 应用优化设置
-'   [F] RunOptimizedWithParams - 带参数的优化运行
+'   [F] SaveAppState            - 保存当前Application状态
+'   [S] RestoreAppState         - 恢复Application状态
+'   [F] RunOptimized            - 在优化环境中运行宏（自动恢复）
+'   [f] ApplyOptimizedSettings  - 应用优化设置
+'   [F] RunOptimizedWithParams  - 带参数的优化运行
 '
 ' SECTION 6: 安全数学运算 / Safe Math Operations
-'   [F] SafeMultiply           - 安全乘法（检查溢出和NaN）
-'   [F] SafeAdd                - 安全加法（检查溢出和NaN）
-'   [F] CalculateSafeArraySize - 计算安全的数组大小
+'   [F] SafeMultiply            - 安全乘法（检查溢出和NaN）
+'   [F] SafeAdd                 - 安全加法（检查溢出和NaN）
+'   [F] CalculateSafeArraySize  - 计算安全的数组大小
 '
 ' SECTION 7: 错误处理增强 / Enhanced Error Handling
-'   [F] SafeExecute            - 统一的安全执行包装器
-'   [f] LogExecutionError      - 记录执行错误
-'   [f] BuildErrorMessage      - 构建错误消息
-'   [F] IsInDesignMode         - 检查是否在设计模式
-'   [S] Assert                 - 调试断言（仅在开发环境生效）
-'   [f] GetCallerInfo          - 获取调用方信息
-'   [f] LogAssertion           - 将断言失败写入日志文件
-'   [f] GetAssertLogPath       - 获取断言日志文件路径
+'   [F] SafeExecute             - 统一的安全执行包装器
+'   [f] LogExecutionError       - 记录执行错误
+'   [f] BuildErrorMessage       - 构建错误消息
+'   [F] IsVBEVisible            - 检查 VBE 主窗口是否可见（近似判断是否处于开发环境）
+'   [S] Assert                  - 调试断言（仅在开发环境生效）
+'   [s] LogAssertion            - 将断言失败写入日志文件
+'   [f] GetAssertLogPath        - 获取断言日志文件路径
 '
 ' SECTION 8: 数据类型转换与验证 / Data Type Conversion and Validation
-'   [F] ToSafeLong             - 安全转换为Long（带范围校验）
-'   [F] ToSafeDouble           - 安全转换为Double（带范围校验）
-'   [F] ToSafeString           - 安全转换为String
-'   [F] IsNumericSafe          - 安全检查是否为数值
-'   [F] IsDateSafe             - 安全检查是否为日期
-'   [F] SanitizeString         - 清理字符串中的不可打印字符（正则实现）
-'   [f] SanitizeStringFallback - 回退到循环方法（兼容性保障）
+'   [F] ToSafeLong              - 安全转换为Long（带范围校验）
+'   [F] ToSafeDouble            - 安全转换为Double（带范围校验）
+'   [F] ToSafeString            - 安全转换为String
+'   [F] IsNumericSafe           - 安全检查是否为数值
+'   [F] IsDateSafe              - 安全检查是否为日期
+'   [F] SanitizeString          - 清理字符串中的不可打印字符（正则实现）
+'   [f] SanitizeStringFallback  - 回退到循环方法（兼容性保障）
 '
 ' SECTION 9: 路径与文件工具 / Path and File Utilities
-'   [F] NormalizePath          - 规范化路径
-'   [F] SafePathCombine        - 安全组合路径
-'   [F] IsNetworkPath          - 判断是否为网络路径
-'   [F] IsSharePointPath       - 判断是否为SharePoint路径（支持HTTP/HTTPS和UNC）
-'   [F] EnsureFolderExists     - 确保文件夹存在（支持多级递归创建）
-'   [f] GetParentFolderPath    - 获取父文件夹路径
-'   [F] GetTempFilePath        - 获取临时文件路径（带唯一性校验）
-'   [f] FormatDateTimeWithMS   - 格式化日期时间（支持毫秒）
+'   [F] NormalizePath           - 规范化路径
+'   [F] SafePathCombine         - 安全组合路径
+'   [F] IsNetworkPath           - 判断是否为网络路径
+'   [F] IsSharePointPath        - 判断是否为SharePoint路径（支持HTTP/HTTPS和UNC）
+'   [F] EnsureFolderExists      - 确保文件夹存在（支持多级递归创建）
+'   [f] GetParentFolderPath     - 获取父文件夹路径
+'   [F] GetTempFilePath         - 获取临时文件路径（带唯一性校验）
+'   [f] FormatDateTimeWithMS    - 格式化日期时间（支持毫秒）
 '
 ' SECTION 10: 性能计时工具 / Performance Timing
-'   [S] StartTimer             - 启动计时器
-'   [F] ElapsedTime            - 获取已用时间
-'   [F] FormatElapsedTime      - 格式化时间显示（支持时/分/秒/毫秒）
-'   [S] LogPerformance         - 记录性能日志（支持阈值警告）
-'   [S] ClearTimers            - 清空所有计时器
-'   [F] GetAllTimers           - 获取所有计时器名称列表（调试用）
-'   [F] TimerExists            - 检查指定计时器是否存在
+'   [S] StartTimer              - 启动计时器
+'   [F] ElapsedTime             - 获取已用时间
+'   [F] FormatElapsedTime       - 格式化时间显示（支持时/分/秒/毫秒）
+'   [S] LogPerformance          - 记录性能日志（支持阈值警告）
+'   [S] ClearTimers             - 清空所有计时器
+'   [F] GetAllTimers            - 获取所有计时器名称列表（调试用）
+'   [F] TimerExists             - 检查指定计时器是否存在
 '
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
@@ -113,35 +115,38 @@ Option Explicit
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] LogInfo
-' 私有辅助函数：记录信息日志
+' 私有辅助函数：记录信息日志（支持指定模块名）
 ' ----------------------------------------------------------------------------------------------
-Private Sub LogInfo(ByVal procName As String, ByVal message As String, Optional ByVal logType As String = "信息")
-    Call app_01_basic.WriteLog(MODULE_NAME, procName, message, logType)
+Private Sub LogInfo(ByVal moduleName As String, ByVal procName As String, _
+                   ByVal message As String, Optional ByVal logType As String = "信息")
+    Call app_01_basic.WriteLog(moduleName, procName, message, logType)
 End Sub
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] LogWarn
-' 私有辅助函数：记录警告日志
+' 私有辅助函数：记录警告日志（支持指定模块名）
 ' ----------------------------------------------------------------------------------------------
-Private Sub LogWarn(ByVal procName As String, ByVal message As String, Optional ByVal logType As String = "警告")
-    Call app_01_basic.WriteLog(MODULE_NAME, procName, "警告: " & message, logType)
+Private Sub LogWarn(ByVal moduleName As String, ByVal procName As String, _
+                   ByVal message As String, Optional ByVal logType As String = "警告")
+    Call app_01_basic.WriteLog(moduleName, procName, "警告: " & message, logType)
 End Sub
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] LogError
-' 私有辅助函数：记录错误日志
+' 私有辅助函数：记录错误日志（支持指定模块名）
 ' ----------------------------------------------------------------------------------------------
-Private Sub LogError(ByVal procName As String, ByVal message As String, Optional ByVal logType As String = "错误处理")
-    Call app_01_basic.WriteLog(MODULE_NAME, procName, "错误: " & message, logType)
+Private Sub LogError(ByVal moduleName As String, ByVal procName As String, _
+                    ByVal message As String, Optional ByVal logType As String = "错误处理")
+    Call app_01_basic.WriteLog(moduleName, procName, "错误: " & message, logType)
 End Sub
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] LogDebug
-' 私有辅助函数：记录调试日志（仅在 DEBUG_MODE 下生效）
+' 私有辅助函数：记录调试日志（支持指定模块名）
 ' ----------------------------------------------------------------------------------------------
-Private Sub LogDebug(ByVal procName As String, ByVal message As String)
+Private Sub LogDebug(ByVal moduleName As String, ByVal procName As String, ByVal message As String)
     #If DEBUG_MODE Then
-        Call app_01_basic.WriteLog(MODULE_NAME, procName, "调试: " & message, "调试")
+        Call app_01_basic.WriteLog(moduleName, procName, "调试: " & message, "调试")
     #End If
 End Sub
 
@@ -164,6 +169,7 @@ Public Const CFG_MATERIALITY_THRESHOLD As String = "MaterialityThreshold"   ' 重
 Public Const CFG_CHUNK_SIZE As String = "ChunkSize"                         ' 分块大小
 Public Const CFG_CHUNK_THRESHOLD As String = "ChunkThreshold"               ' 触发分块的阈值行数
 Public Const CFG_PYTHON_TIMEOUT As String = "PythonTimeout"                 ' Python超时时间（秒）
+
 ' 解析器相关配置键
 Public Const CFG_STRICT_LOB_MATCHING As String = "StrictLoBMatching"        ' 是否严格匹配LoB
 ' 后续新增配置键必须在此添加常量定义
@@ -229,6 +235,7 @@ Public Function GetArrayInfo(arr As Variant) As Object
     
     ' 获取维度信息
     On Error Resume Next
+    Err.Clear
     Dim dims As Long
     dims = GetArrayDimensions(arr)
     
@@ -282,6 +289,7 @@ Private Function GetArrayDimensions(arr As Variant) As Long
     dims = 0
     
     On Error Resume Next
+    Err.Clear
     
     Do
         dims = dims + 1
@@ -290,7 +298,7 @@ Private Function GetArrayDimensions(arr As Variant) As Long
     Loop Until Err.Number <> 0
     
     GetArrayDimensions = dims - 1
-    
+    Err.Clear
     On Error GoTo 0
 End Function
 
@@ -370,7 +378,7 @@ Public Function NormalizeTo1Based(arr As Variant, Optional makeCopy As Boolean =
     
     ' 处理三维及以上数组 - 保持原样并记录警告
     If info("Dims") > 2 Then
-        Call LogWarn("NormalizeTo1Based", _
+        Call LogWarn(MODULE_NAME, "NormalizeTo1Based", _
              "遇到 " & info("Dims") & " 维数组，当前版本保持原样返回", _
              "数组处理")
         NormalizeTo1Based = arr
@@ -507,6 +515,7 @@ Public Function EnsureArrayDimensions(ByRef arr As Variant, _
     
     ' 重建数组（使用 ReDim Preserve 仅当最后一维扩展时有效）
     On Error Resume Next
+    Err.Clear
     
     ' 尝试直接 ReDim Preserve
     ReDim Preserve arr(1 To newRows, 1 To newCols)
@@ -546,18 +555,28 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 ' [F] SliceArraySafe
 ' 安全切片（带边界检查）。从源数组中提取指定行/列范围，返回1-based新数组。
-' 对于来自Worksheet.Range的数组，可以利用VBA的切片特性；对内存数组采用循环。
+' 所有范围参数均为可选，省略时使用源数组的对应边界。
 '
 ' 参数:
 '   arr - 源数组
-'   rowStart, rowEnd - 行范围（使用源数组的索引系统）
-'   colStart, colEnd - 列范围（使用源数组的索引系统）
+'   rowStart, rowEnd - 行范围（可选，省略时使用 LBound1/UBound1）
+'   colStart, colEnd - 列范围（可选，省略时使用 LBound2/UBound2）
 '
 ' 返回: Variant - 切片后的1-based数组，无效范围返回EMPTY_VALUE
+'
+' 使用示例:
+'   ' 取前10行
+'   result = SliceArraySafe(arr, 1, 10)
+'   ' 取所有行，第2-5列
+'   result = SliceArraySafe(arr, , , 2, 5)
+'   ' 取子矩阵
+'   result = SliceArraySafe(arr, 5, 10, 2, 4)
 ' ----------------------------------------------------------------------------------------------
 Public Function SliceArraySafe(arr As Variant, _
-                              ByVal rowStart As Variant, ByVal rowEnd As Variant, _
-                              ByVal colStart As Variant, ByVal colEnd As Variant) As Variant
+                              Optional ByVal rowStart As Variant, _
+                              Optional ByVal rowEnd As Variant, _
+                              Optional ByVal colStart As Variant, _
+                              Optional ByVal colEnd As Variant) As Variant
     
     ' 验证源数组
     If Not IsArrayValid(arr, requireData:=True, require2D:=True) Then
@@ -569,10 +588,10 @@ Public Function SliceArraySafe(arr As Variant, _
     Set info = GetArrayInfo(arr)
     
     ' 处理缺省参数
-    If IsMissing(rowStart) Or IsEmpty(rowStart) Then rowStart = info("LBound1")
-    If IsMissing(rowEnd) Or IsEmpty(rowEnd) Then rowEnd = info("UBound1")
-    If IsMissing(colStart) Or IsEmpty(colStart) Then colStart = info("LBound2")
-    If IsMissing(colEnd) Or IsEmpty(colEnd) Then colEnd = info("UBound2")
+    If IsMissing(rowStart) Or IsEmpty(rowStart) Or IsNull(rowStart) Then rowStart = info("LBound1")
+    If IsMissing(rowEnd) Or IsEmpty(rowEnd) Or IsNull(rowEnd) Then rowEnd = info("UBound1")
+    If IsMissing(colStart) Or IsEmpty(colStart) Or IsNull(colStart) Then colStart = info("LBound2")
+    If IsMissing(colEnd) Or IsEmpty(colEnd) Or IsNull(colEnd) Then colEnd = info("UBound2")
     
     ' 边界检查
     If rowStart < info("LBound1") Or rowStart > info("UBound1") Or _
@@ -615,7 +634,7 @@ Public Function SliceArraySafe(arr As Variant, _
     Dim result() As Variant
     ReDim result(1 To rows, 1 To cols)
     
-    ' 逐元素复制（这是最安全的方式）
+    ' 逐元素复制
     Dim r As Long, c As Long
     Dim srcR As Long, srcC As Long
     
@@ -630,6 +649,19 @@ Public Function SliceArraySafe(arr As Variant, _
     SliceArraySafe = result
 End Function
 
+' ----------------------------------------------------------------------------------------------
+' [F] SliceArraySafeFull
+' 安全切片：返回源数组的完整副本（相当于所有参数省略）
+'
+' 参数:
+'   arr - 源数组
+'
+' 返回: Variant - 源数组的1-based副本
+' ----------------------------------------------------------------------------------------------
+Public Function SliceArraySafeFull(ByVal arr As Variant) As Variant
+    SliceArraySafeFull = SliceArraySafe(arr:=arr)
+End Function
+
 ' ==============================================================================================
 ' SECTION 3: 范围/工作表安全操作 / Range and Worksheet Safety
 ' ==============================================================================================
@@ -640,7 +672,7 @@ End Function
 '
 ' 参数:
 '   rangeName - 命名范围名称（必需）
-'   sheet - 工作表对象（可选，如果提供则优先在该工作表中查找）
+'   sheet - 工作表对象（可选，如果提供则优先查找该工作表的局部名称）
 '   wb - 工作簿对象（可选，默认为ThisWorkbook）
 '
 ' 返回: Range对象，或Nothing
@@ -649,31 +681,46 @@ Public Function GetNamedRangeSafely(ByVal rangeName As String, _
                                    Optional sheet As Worksheet, _
                                    Optional wb As Workbook) As Range
     
+    ' 参数验证
+    If rangeName = "" Then
+        Set GetNamedRangeSafely = Nothing
+        Exit Function
+    End If
+    
     ' 默认工作簿
     If wb Is Nothing Then Set wb = ThisWorkbook
     
     On Error Resume Next
+    Err.Clear
+    
+    Dim nameObj As name
     Dim rng As Range
     
-    ' 如果提供了工作表，先尝试在工作表级名称中查找
+    ' === 方法1：优先查找工作表级命名范围 ===
     If Not sheet Is Nothing Then
-        Set rng = sheet.Range(rangeName)
+        ' 通过工作表的 Names 集合查找（不会错误解析地址）
+        Set nameObj = sheet.Names(rangeName)
+        
         If Err.Number = 0 Then
+            ' 获取命名范围引用的区域
+            Set rng = nameObj.RefersToRange
+            
             ' 验证范围是否有效（非空）
             If Not rng Is Nothing And rng.Cells.count > 0 Then
                 Set GetNamedRangeSafely = rng
-            Else
-                Set GetNamedRangeSafely = Nothing
+                On Error GoTo 0
+                Exit Function
             End If
-            On Error GoTo 0
-            Exit Function
         End If
         Err.Clear
     End If
     
-    ' 尝试工作簿级名称
-    Set rng = wb.Names(rangeName).RefersToRange
+    ' === 方法2：查找工作簿级命名范围 ===
+    Set nameObj = wb.Names(rangeName)
+    
     If Err.Number = 0 Then
+        Set rng = nameObj.RefersToRange
+        
         ' 验证范围是否有效（非空）
         If Not rng Is Nothing And rng.Cells.count > 0 Then
             Set GetNamedRangeSafely = rng
@@ -744,6 +791,7 @@ Public Function IsWorksheetValid(ws As Worksheet, Optional checkVisible As Boole
     End If
     
     On Error Resume Next
+    Err.Clear
     
     ' 检查工作表是否存在（通过获取名称）
     Dim name As String
@@ -778,12 +826,23 @@ Public Function GetLastRowSafely(ws As Worksheet, Optional column As Variant = 1
     
     On Error Resume Next
     
+    ' FilterMode=True 表示当前存在筛选结果（部分行被过滤隐藏）
+    If ws.FilterMode Then
+        MsgBox "检测到工作表 [" & ws.name & "] 当前筛选条件生效（FilterMode=True）。" & vbCrLf & _
+               "为避免获取末行不准确，请先清除筛选条件后再执行该操作。", _
+               vbExclamation, "GetLastRowSafely"
+        GetLastRowSafely = 0
+        On Error GoTo 0
+        Exit Function
+    End If
+    
     ' 将列参数转换为列号（如果是字母）
     Dim colNum As Long
     If IsNumeric(column) Then
         colNum = CLng(column)
     Else
-        colNum = Range(column & "1").column
+        ' 必须使用 ws 限定，避免隐式 ActiveSheet
+        colNum = ws.Range(CStr(column) & "1").column
     End If
     
     ' 校验列号是否有效
@@ -811,7 +870,7 @@ End Function
 '
 ' 参数:
 '   ws - 工作表对象
-'   row - 要检查的行（默认为1）
+'   row - 要检查的行（可以是行号或行数字符串，默认为1）
 '
 ' 返回: Long - 最后一列的列号，如果无数据或无效行则返回0
 ' ----------------------------------------------------------------------------------------------
@@ -829,6 +888,7 @@ Public Function GetLastColSafely(ws As Worksheet, Optional row As Variant = 1) A
         rowNum = CLng(row)
     Else
         ' 如果传入的是字符串（如"1"），也尝试转换
+        ' 这里不需要工作表限定，因为只是数值转换
         rowNum = val(row)
     End If
     
@@ -875,14 +935,14 @@ Public Function GetConfigValue(config As Object, _
     
     ' 校验配置对象和键是否存在
     If config Is Nothing Then
-        Call LogError("GetConfigValue", "配置对象为空，无法获取键: " & key, "配置错误")
+        Call LogError(MODULE_NAME, "GetConfigValue", "配置对象为空，无法获取键: " & key, "配置错误")
         GetConfigValue = defaultValue
         Exit Function
     End If
     
     If Not config.exists(key) Then
         ' 键不存在，记录调试信息（非错误，可能只是未配置）
-        Call LogDebug("GetConfigValue", "配置键不存在，使用默认值: " & key)
+        Call LogDebug(MODULE_NAME, "GetConfigValue", "配置键不存在，使用默认值: " & key)
         GetConfigValue = defaultValue
         Exit Function
     End If
@@ -899,6 +959,7 @@ Public Function GetConfigValue(config As Object, _
     
     ' 进行类型转换
     On Error Resume Next
+    Err.Clear
     
     Dim convertedValue As Variant
     convertedValue = EMPTY_VALUE
@@ -918,13 +979,25 @@ Public Function GetConfigValue(config As Object, _
             convertedValue = CStr(rawValue)
             
         Case "BOOLEAN", "BOOL"
-            If IsNumeric(rawValue) Then
-                convertedValue = CBool(rawValue)
-            ElseIf VarType(rawValue) = vbString Then
-                Dim lowerVal As String
-                lowerVal = LCase(CStr(rawValue))
-                convertedValue = (lowerVal = "true" Or lowerVal = "yes" Or lowerVal = "1")
-            End If
+            Select Case VarType(rawValue)
+                Case vbBoolean
+                    ' 已经是布尔值，直接使用
+                    convertedValue = CBool(rawValue)
+                    
+                Case vbString
+                    ' 字符串类型，解析 true/yes/1
+                    Dim lowerVal As String
+                    lowerVal = LCase$(Trim$(CStr(rawValue)))
+                    convertedValue = (lowerVal = "true" Or lowerVal = "yes" Or lowerVal = "1")
+                    
+                Case Else
+                    ' 其他类型（主要是数值），尝试数值转换
+                    If IsNumeric(rawValue) Then
+                        convertedValue = CBool(rawValue)
+                    Else
+                        ' 无法转换，保持 Empty，后续会触发失败
+                    End If
+            End Select
             
         Case "DATE"
             If IsDate(rawValue) Then
@@ -943,7 +1016,7 @@ Public Function GetConfigValue(config As Object, _
     
     ' 检查转换是否成功
     If Err.Number <> 0 Or IsEmpty(convertedValue) Then
-        Call LogError("GetConfigValue", "配置键 [" & key & "] 转换为 " & valueType & " 失败，使用默认值", "配置错误")
+        Call LogError(MODULE_NAME, "GetConfigValue", "配置键 [" & key & "] 转换为 " & valueType & " 失败，使用默认值", "配置错误")
         GetConfigValue = defaultValue
     Else
         GetConfigValue = convertedValue
@@ -972,17 +1045,13 @@ Public Function SetConfigValue(config As Object, _
     
     ' 统一错误捕获，覆盖全阶段
     On Error Resume Next
+    Err.Clear
     
     ' 验证配置对象
     If config Is Nothing Then
-        Call LogError("SetConfigValue", "配置对象为空，无法设置键: " & key, "配置错误")
+        Call LogError(MODULE_NAME, "SetConfigValue", "配置对象为空，无法设置键: " & key, "配置错误")
         SetConfigValue = False
         Exit Function
-    End If
-    
-    ' 验证键名（检查是否以CFG_开头，但非强制，仅记录警告）
-    If Left(key, 4) <> "CFG_" Then
-        Call LogWarn("SetConfigValue", "配置键 [" & key & "] 未使用 CFG_前缀，建议使用常量", "配置规范")
     End If
     
     ' 根据类型进行验证和转换
@@ -990,8 +1059,8 @@ Public Function SetConfigValue(config As Object, _
     convertedValue = value
     
     If valueType <> "" Then
-        Select Case valueType
-            Case "Long"
+        Select Case UCase$(valueType)
+            Case "LONG"
                 If IsNumeric(value) Then
                     convertedValue = CLng(value)
                 Else
@@ -999,7 +1068,7 @@ Public Function SetConfigValue(config As Object, _
                     Exit Function
                 End If
                 
-            Case "Double"
+            Case "DOUBLE"
                 If IsNumeric(value) Then
                     convertedValue = CDbl(value)
                 Else
@@ -1007,20 +1076,30 @@ Public Function SetConfigValue(config As Object, _
                     Exit Function
                 End If
                 
-            Case "String"
+            Case "STRING"
                 convertedValue = CStr(value)
                 
-            Case "Boolean"
-                If IsNumeric(value) Then
-                    convertedValue = CBool(value)
-                ElseIf VarType(value) = vbString Then
-                    Dim lowerVal As String
-                    lowerVal = LCase(CStr(value))
-                    convertedValue = (lowerVal = "true" Or lowerVal = "yes" Or lowerVal = "1")
-                Else
-                    SetConfigValue = False
-                    Exit Function
-                End If
+            Case "BOOLEAN"
+                Select Case VarType(value)
+                    Case vbBoolean
+                        ' 已经是布尔值，直接使用
+                        convertedValue = CBool(value)
+                        
+                    Case vbString
+                        ' 字符串类型，解析 true/yes/1
+                        Dim lowerVal As String
+                        lowerVal = LCase$(Trim$(CStr(value)))
+                        convertedValue = (lowerVal = "true" Or lowerVal = "yes" Or lowerVal = "1")
+                        
+                    Case Else
+                        ' 其他类型（主要是数值），尝试数值转换
+                        If IsNumeric(value) Then
+                            convertedValue = CBool(value)
+                        Else
+                            SetConfigValue = False
+                            Exit Function
+                        End If
+                End Select
                 
             Case Else
                 ' 未知类型，保持原值
@@ -1037,13 +1116,15 @@ Public Function SetConfigValue(config As Object, _
     End If
     
     ' 设置值
+    Err.Clear
     config(key) = convertedValue
     
     ' 检查是否成功
     If Err.Number = 0 Then
+        Err.Clear
         SetConfigValue = True
     Else
-        Call LogError("SetConfigValue", "设置配置键 [" & key & "] 失败: " & Err.Description, "配置错误")
+        Call LogError(MODULE_NAME, "SetConfigValue", "设置配置键 [" & key & "] 失败: " & Err.Description, "配置错误")
         SetConfigValue = False
     End If
     
@@ -1165,12 +1246,13 @@ Public Function RunOptimized(ByVal macroName As String, _
     End If
     
     ' 执行宏
+    Err.Clear
     Application.Run macroName
     
     ' 检查是否发生错误
     If Err.Number <> 0 Then
         success = False
-        Call LogError("RunOptimized", "执行宏 [" & macroName & "] 时发生错误: " & Err.Description, "错误处理")
+        Call LogError(MODULE_NAME, "RunOptimized", "执行宏 [" & macroName & "] 时发生错误: " & Err.Description, "错误处理")
     End If
     
     ' 恢复状态
@@ -1219,6 +1301,7 @@ Public Function RunOptimizedWithParams(ByVal macroName As String, _
     
     ' 统一错误捕获
     On Error Resume Next
+    Err.Clear
     
     ' 应用优化设置（复用私有函数）
     Call ApplyOptimizedSettings
@@ -1274,7 +1357,7 @@ Public Function RunOptimizedWithParams(ByVal macroName As String, _
             
         Case Else
             ' 参数过多，记录错误
-            Call LogError("RunOptimizedWithParams", _
+            Call LogError(MODULE_NAME, "RunOptimizedWithParams", _
                          "参数数量超过 10 个（实际 " & paramCount & "），不支持。如需更多参数，请在代码中添加对应分支。", _
                          "错误处理")
             success = False
@@ -1283,7 +1366,7 @@ Public Function RunOptimizedWithParams(ByVal macroName As String, _
     ' 检查执行是否发生错误
     If Err.Number <> 0 Then
         success = False
-        Call LogError("RunOptimizedWithParams", "执行宏 [" & macroName & "] 时发生错误: " & Err.Description, "错误处理")
+        Call LogError(MODULE_NAME, "RunOptimizedWithParams", "执行宏 [" & macroName & "] 时发生错误: " & Err.Description, "错误处理")
     End If
     
     ' 恢复状态
@@ -1307,6 +1390,7 @@ Public Function SafeMultiply(ByVal a As Double, ByVal b As Double, _
                             Optional ByVal maxVal As Double = SAFE_MAX_LONG) As Variant
     
     On Error Resume Next
+    Err.Clear
     
     Dim result As Double
     result = a * b
@@ -1336,6 +1420,7 @@ Public Function SafeAdd(ByVal a As Double, ByVal b As Double, _
                        Optional ByVal maxVal As Double = SAFE_MAX_LONG) As Variant
     
     On Error Resume Next
+    Err.Clear
     
     Dim result As Double
     result = a + b
@@ -1450,7 +1535,7 @@ Public Function SafeExecute(ByVal moduleName As String, _
     
     ' 参数验证
     If macroName = "" Then
-        Call LogError(procName, "宏名为空，无法执行", "错误处理")
+        Call LogError(MODULE_NAME, procName, "宏名为空，无法执行", "错误处理")
         SafeExecute = False
         Exit Function
     End If
@@ -1529,7 +1614,7 @@ Private Sub LogExecutionError(ByVal procName As String, _
         logMsg = logMsg & " | " & customMsg
     End If
     
-    Call LogError(procName, logMsg, "错误处理")
+    Call LogError(MODULE_NAME, procName, logMsg, "错误处理")
 End Sub
 
 ' ----------------------------------------------------------------------------------------------
@@ -1551,17 +1636,18 @@ Private Function BuildErrorMessage(ByVal procName As String, _
 End Function
 
 ' ----------------------------------------------------------------------------------------------
-' [F] IsInDesignMode
-' 检查是否在设计模式（用于调试断言）。
+' [F] IsVBEVisible
+' 检查 VBE 主窗口是否可见（近似判断是否处于开发环境）。
+' 注意：这不是严格的设计模式判断，仅用于调试辅助。
+'       在某些安全策略禁用 VBE 的环境下，即使处于设计模式也会返回 False。
 '
 ' 参数:
 '   forceRefresh - 是否强制刷新状态（默认False）
-'                  如果为True，则重新检查并更新静态变量
 '
-' 返回: Boolean - True表示在设计模式
+' 返回: Boolean - True 表示 VBE 主窗口可见
 ' ----------------------------------------------------------------------------------------------
-Public Function IsInDesignMode(Optional ByVal forceRefresh As Boolean = False) As Boolean
-    Static inDesign As Boolean
+Public Function IsVBEVisible(Optional ByVal forceRefresh As Boolean = False) As Boolean
+    Static vbeVisible As Boolean
     Static checked As Boolean
     
     ' 如果需要强制刷新，重置检查标志
@@ -1574,7 +1660,6 @@ Public Function IsInDesignMode(Optional ByVal forceRefresh As Boolean = False) A
         On Error Resume Next
         
         ' 检查 VBE 是否可用且主窗口可见
-        Dim vbeVisible As Boolean
         vbeVisible = False
         
         ' 先检查 VBE 对象是否存在
@@ -1582,18 +1667,17 @@ Public Function IsInDesignMode(Optional ByVal forceRefresh As Boolean = False) A
             vbeVisible = (Application.VBE.MainWindow.Visible = True)
         End If
         
-        inDesign = vbeVisible
         checked = True
         
         On Error GoTo 0
     End If
     
-    IsInDesignMode = inDesign
+    IsVBEVisible = vbeVisible
 End Function
 
 ' ----------------------------------------------------------------------------------------------
 ' [S] Assert
-' 调试断言（仅在开发环境生效）。条件为False时弹出对话框，支持中断/继续/忽略选项。
+' 调试断言（仅在开发环境生效）。条件为False时弹出对话框，支持继续/忽略选项。
 '
 ' 参数:
 '   condition - 断言条件
@@ -1609,28 +1693,22 @@ Public Sub Assert(ByVal condition As Boolean, _
     
     #If DEBUG_MODE Then
         If Not condition Then
-            ' 获取调用信息
-            Dim callerInfo As String
-            callerInfo = GetCallerInfo(2)  ' 获取上一级调用信息
-            
             ' 构建完整消息
             Dim fullMsg As String
             fullMsg = "断言失败"
             If message <> "" Then
                 fullMsg = fullMsg & ": " & message
             End If
-            fullMsg = fullMsg & vbCrLf & vbCrLf & "调用位置: " & callerInfo
             
             ' 输出到立即窗口
             Debug.Print "========== 断言失败 =========="
             Debug.Print "时间: " & Now
             Debug.Print "消息: " & IIf(message = "", "无", message)
-            Debug.Print "调用: " & callerInfo
             Debug.Print "==============================="
             
             ' 写入日志文件
             If logToFile Then
-                Call LogAssertion(callerInfo, message)
+                Call LogAssertion(message)
             End If
             
             ' 弹出对话框，提供调试选项
@@ -1638,71 +1716,21 @@ Public Sub Assert(ByVal condition As Boolean, _
             response = MsgBox(fullMsg & vbCrLf & vbCrLf & _
                               "请选择操作：" & vbCrLf & _
                               "   - 是(Y)：进入中断模式（调试）" & vbCrLf & _
-                              "   - 否(N)：继续执行" & vbCrLf & _
-                              "   - 取消：忽略后续所有断言", _
-                              vbYesNoCancel + vbExclamation, "调试断言")
+                              "   - 否(N)：继续执行", _
+                              vbYesNo + vbExclamation, "调试断言")
             
-            Select Case response
-                Case vbYes
-                    ' 进入中断模式
-                    Stop
-                Case vbCancel
-                    ' 忽略后续断言（可以通过全局变量控制，这里简化）
-                    ' 可以设置一个全局标志，但这里不实现
-                Case vbNo
-                    ' 继续执行
-            End Select
+            If response = vbYes Then
+                Stop  ' 进入中断模式
+            End If
         End If
     #End If
 End Sub
 
 ' ----------------------------------------------------------------------------------------------
-' [f] GetCallerInfo
-' 私有辅助函数：获取调用方信息（模块名、过程名、行号）
-'
-' 参数:
-'   depth - 调用栈深度（1表示直接调用方，2表示上一级，以此类推）
-' ----------------------------------------------------------------------------------------------
-Private Function GetCallerInfo(Optional ByVal depth As Long = 1) As String
-    On Error Resume Next
-    
-    Dim result As String
-    result = "未知调用位置"
-    
-    ' VBA中没有直接获取调用栈的API，但可以通过错误对象获取部分信息
-    ' 这里模拟一个简单的实现
-    
-    ' 方法1：通过 Err 对象获取（需要先产生一个错误）
-    Dim savedErrNum As Long
-    Dim savedErrDesc As String
-    savedErrNum = Err.Number
-    savedErrDesc = Err.Description
-    
-    On Error GoTo 0
-    
-    ' 尝试通过 Application.Caller 获取（仅适用于工作表函数）
-    Dim caller As String
-    caller = Application.caller
-    
-    If caller <> "" Then
-        result = "调用方: " & caller
-    Else
-        ' 回退到模块名+过程名（需要手动传入）
-        result = "深度 " & depth & " 调用"
-    End If
-    
-    ' 恢复错误状态
-    Err.Number = savedErrNum
-    Err.Description = savedErrDesc
-    
-    GetCallerInfo = result
-End Function
-
-' ----------------------------------------------------------------------------------------------
 ' [f] LogAssertion
 ' 私有辅助函数：将断言失败写入日志文件
 ' ----------------------------------------------------------------------------------------------
-Private Sub LogAssertion(ByVal callerInfo As String, ByVal message As String)
+Private Sub LogAssertion(ByVal message As String)
     On Error Resume Next
     
     Dim logPath As String
@@ -1716,7 +1744,7 @@ Private Sub LogAssertion(ByVal callerInfo As String, ByVal message As String)
     fileNum = FreeFile
     
     Open logPath For Append As #fileNum
-    Print #fileNum, "[" & Now & "] 断言失败 - " & callerInfo
+    Print #fileNum, "[" & Now & "] 断言失败"
     If message <> "" Then
         Print #fileNum, "  消息: " & message
     End If
@@ -1724,7 +1752,7 @@ Private Sub LogAssertion(ByVal callerInfo As String, ByVal message As String)
     Close #fileNum
     
     On Error GoTo 0
-End Function
+End Sub
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] GetAssertLogPath
@@ -1942,7 +1970,7 @@ Public Function SanitizeString(ByVal text As String, _
     With regex
         .Global = True
         .IgnoreCase = True
-        .Pattern = "[^\x20-\x7E]"  ' 匹配所有不可打印ASCII字符（0-31、127）
+        .Pattern = "[\x00-\x1F\x7F]"  ' 只匹配 ASCII 控制字符（0-31, 127）
     End With
     
     ' 执行替换
@@ -1988,48 +2016,71 @@ End Function
 '   keepTrailingSlash - 是否保留末尾的反斜杠（默认False）
 '                       如果为True，确保路径以反斜杠结尾
 '                       如果为False，移除末尾的反斜杠
+'                       只对文件系统路径生效
 '
 ' 返回: String - 规范化后的路径
 ' ----------------------------------------------------------------------------------------------
 Public Function NormalizePath(ByVal filePath As String, _
                              Optional ByVal keepTrailingSlash As Boolean = False) As String
     
+    Dim s As String
+    s = Trim$(filePath)
+    
     ' 空路径直接返回
-    If filePath = "" Then
+    If s = "" Then
         NormalizePath = ""
         Exit Function
     End If
     
-    Dim result As String
-    result = filePath
+    ' === URL 路径特殊处理 ===
+    If LCase$(Left$(s, 7)) = "http://" Or LCase$(Left$(s, 8)) = "https://" Then
+        ' 归一化连续的 /（从协议头后开始，避免破坏 http://）
+        Do While InStr(9, s, "//") > 0
+            s = Replace$(s, "//", "/")
+        Loop
+        
+        ' URL 路径不处理末尾分隔符
+        NormalizePath = s
+        Exit Function
+    End If
     
-    ' 去除首尾空格
-    result = Trim(result)
+    ' === 文件系统路径处理 ===
+    ' 将正斜杠替换为反斜杠
+    s = Replace$(s, "/", "\")
     
-    ' 替换正斜杠为反斜杠
-    result = Replace(result, "/", "\")
+    ' === UNC 路径保护 ===
+    Dim isUNC As Boolean
+    isUNC = (Left$(s, 2) = "\\")
     
-    ' 清理多余的路径分隔符
-    Dim original As String
-    Do
-        original = result
-        result = Replace(result, "\\", "\")
-    Loop While original <> result
+    ' 如果是 UNC 路径，先去掉前导 \\，避免被归一化误伤
+    If isUNC Then
+        s = Mid$(s, 3)  ' 去掉前导 \\
+    End If
+    
+    ' 归一化连续的 \
+    Do While InStr(s, "\\") > 0
+        s = Replace$(s, "\\", "\")
+    Loop
+    
+    ' 如果是 UNC 路径，恢复前导 \\
+    If isUNC Then
+        s = "\\" & s
+    End If
     
     ' 处理末尾分隔符
     If keepTrailingSlash Then
-        ' 确保以反斜杠结尾（除非路径为空或已经是根路径如"C:\"）
-        If Right(result, 1) <> "\" Then
-            result = result & "\"
+        ' 确保以反斜杠结尾（除非路径为空）
+        If Right$(s, 1) <> "\" Then
+            s = s & "\"
         End If
     Else
-        ' 移除末尾的反斜杠（但保留根路径如"C:\"）
-        If Len(result) > 3 And Right(result, 1) = "\" Then
-            result = Left(result, Len(result) - 1)
+        ' 移除末尾的反斜杠（但保留根路径如 "C:\"）
+        If Len(s) > 3 And Right$(s, 1) = "\" Then
+            s = Left$(s, Len(s) - 1)
         End If
     End If
     
-    NormalizePath = result
+    NormalizePath = s
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -2130,6 +2181,7 @@ Public Function EnsureFolderExists(ByVal folderPath As String, _
     normalized = NormalizePath(folderPath, False)
     
     On Error Resume Next
+    Err.Clear
     
     ' 检查文件夹是否已存在
     Dim attr As Long
@@ -2159,6 +2211,7 @@ Public Function EnsureFolderExists(ByVal folderPath As String, _
     End If
     
     ' 创建当前文件夹
+    Err.Clear
     MkDir normalized
     
     ' 检查是否成功
@@ -2295,6 +2348,7 @@ Public Function GetTempFilePath(Optional ByVal prefix As String = "tmp", _
         
         ' 检查文件是否存在
         On Error Resume Next
+        Err.Clear
         Dim attr As Long
         attr = GetAttr(filePath)
         fileExists = (Err.Number = 0)
@@ -2306,14 +2360,10 @@ Public Function GetTempFilePath(Optional ByVal prefix As String = "tmp", _
             Exit Function
         End If
         
-        ' 短暂等待，让 Timer 变化（避免同一毫秒内重复）
-        If attempt < maxAttempts Then
-            Application.Wait Now + TimeValue("00:00:00.001")
-        End If
     Next attempt
     
     ' 达到最大尝试次数仍未找到可用文件名
-    Call LogError("GetTempFilePath", "无法生成唯一的临时文件名，已尝试 " & maxAttempts & " 次", "路径错误")
+    Call LogError(MODULE_NAME, "GetTempFilePath", "无法生成唯一的临时文件名，已尝试 " & maxAttempts & " 次", "路径错误")
     GetTempFilePath = ""
 End Function
 
@@ -2395,7 +2445,7 @@ Public Sub StartTimer(ByVal timerName As String)
     
     ' 参数验证
     If timerName = "" Then
-        Call LogError("StartTimer", "计时器名称为空，无法启动", "性能监控")
+        Call LogError(MODULE_NAME, "StartTimer", "计时器名称为空，无法启动", "性能监控")
         Exit Sub
     End If
     
@@ -2422,7 +2472,7 @@ Public Function ElapsedTime(ByVal timerName As String, _
     
     ' 参数验证
     If timerName = "" Then
-        Call LogError("ElapsedTime", "计时器名称为空", "性能监控")
+        Call LogError(MODULE_NAME, "ElapsedTime", "计时器名称为空", "性能监控")
         ElapsedTime = defaultValue
         Exit Function
     End If
@@ -2536,7 +2586,7 @@ Public Sub LogPerformance(ByVal moduleName As String, _
     
     ' 检查计时器是否有效
     If elapsed = -1 Then
-        Call LogError(operation, "无法获取计时器 [" & timerName & "] 的耗时", "性能监控错误")
+        Call LogError(MODULE_NAME, operation, "无法获取计时器 [" & timerName & "] 的耗时", "性能监控错误")
         Exit Sub
     End If
     
@@ -2557,14 +2607,14 @@ Public Sub LogPerformance(ByVal moduleName As String, _
         logType = "性能警告"
         
         ' 额外记录详细日志
-        Call LogWarn(operation, "操作耗时超过阈值！实际: " & formattedTime & "，阈值: " & FormatElapsedTime(thresholdSeconds), "性能警告")
+        Call LogWarn(MODULE_NAME, operation, "操作耗时超过阈值！实际: " & formattedTime & "，阈值: " & FormatElapsedTime(thresholdSeconds), "性能警告")
     End If
     
     ' 记录日志（根据类型选择不同的日志函数）
     If logType = "性能警告" Then
-        Call LogWarn(operation, logMsg, logType)
+        Call LogWarn(MODULE_NAME, operation, logMsg, logType)
     Else
-        Call LogInfo(operation, logMsg, logType)
+        Call LogInfo(MODULE_NAME, operation, logMsg, logType)
     End If
 End Sub
 
