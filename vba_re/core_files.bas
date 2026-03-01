@@ -11,47 +11,61 @@ Attribute VB_Name = "core_files"
 ' STATUS            : Frozen
 ' ==============================================================================================
 ' VERSION HISTORY   :
+' v1.0.0
+'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+
 ' v2.0.0
 '   - Refactor: split project into layered architecture (Core / Platform / Business).
 '   - Freeze: query-only Excel helpers + pure path/URL parsing/shape-validation.
 '   - Merge: previous path/url sections consolidated into SECTION 02.
-'
-' v1.0.0
-'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+
+' v2.1.0
+'   - Fix (Contract): GetLastRowSafely no longer returns -1 for FilterMode;
+'                     unified failure semantics to return 0 with errMsg explanation.
+'   - Fix (Diagnostics): Refine error messages for invalid row/column inputs;
+'                        distinguish non-numeric from out-of-range cases.
+'   - Fix (Validation): ValidateFilePath no longer delegates all HTTP URLs to
+'                       IsSharePointURLValid; now performs basic host validation
+'                       and treats SharePoint checks as separate responsibility.
+'   - Fix (Consistency): NormalizePath now applies keepTrailingSlash consistently
+'                        for URL inputs (previously ignored for URLs).
+'   - Fix (Documentation): Updated function comments to reflect unified 0-return
+'                          semantics and clarified HTTP validation scope.
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
 ' SECTION 01: EXCEL WORKSHEET & RANGE & NAME
-'   [F] IsWorksheetValid        - Validates worksheet object, optional visible check
-'   [F] IsWorksheetExist        - Checks if worksheet exists in workbook (optional outWs)
-'   [F] GetLastRowSafely        - Safely gets last row for a target column (filter-mode aware)
-'   [F] GetLastColSafely        - Safely gets last col for a target row
-'   [F] TryGetNamedRange        - Tries sheet-level then workbook-level named range
-'   [F] GetActualDataRangeCore  - Gets CurrentRegion around an anchor address
-'   [f] ResolveRowIndex         - Parses/validates row index
-'   [f] ResolveColumnIndex      - Parses/validates column index (number or letters)
-'   [f] ColumnLettersToNumber   - Converts column letters (A..XFD) to number
+'   [F] IsWorksheetValid                - Validates worksheet object, optional visible check
+'   [F] IsWorksheetExist                - Checks if worksheet exists in workbook (optional outWs)
+'   [F] GetLastRowSafely                - Safely gets last row for a target column (filter-mode aware)
+'   [F] GetLastColSafely                - Safely gets last col for a target row
+'   [F] TryGetNamedRange                - Tries sheet-level then workbook-level named range
+'   [F] GetActualDataRangeCore          - Gets CurrentRegion around an anchor address
+'   [f] ResolveRowIndex                 - Parses/validates row index
+'   [f] ResolveColumnIndex              - Parses/validates column index (number or letters)
+'   [f] ColumnLettersToNumber           - Converts column letters (A..XFD) to number
 '
 ' SECTION 02: PATH & URL (PURE)
-'   [F] NormalizePath           - Normalizes file path or URL (slashes, duplicates, trailing)
-'   [F] SafePathCombine         - Combines base + relative part safely (absolute passthrough)
-'   [F] IsNetworkPath           - UNC detection (\\)
-'   [F] IsSharePointPath        - SharePoint shape detection (URL/UNC)
-'   [F] IsSharePointURLValid    - SharePoint URL shape validation (no open/IO)
-'   [F] GetNameFromURL          - Extracts last segment (supports URL decode + strip query)
-'   [F] GetFileNameWithoutExt   - Extracts name without extension
-'   [F] DecodeURL               - Lightweight %XX decoder (+ -> space)
-'   [f] IsAbsolutePath          - Absolute path detection (drive/UNC/URL)
-'   [f] GetParentFolderPath     - Parent folder for path/URL
-'   [f] IsHttpUrl               - Checks http/https
-'   [f] NormalizeUrlSlashes     - Normalizes URL slashes
-'   [f] NormalizeRelativeUrlPiece - Normalizes relative URL path part
-'   [f] CollapseBackslashesPreserveUNC - Collapses backslashes preserving UNC prefix
-'   [f] StripUrlQueryFragment   - Removes ?query and #fragment
-'   [f] GetUrlHost              - Extracts host from URL
-'   [f] ContainsInvalidPathChars - Windows invalid char / control char check
-'   [f] HexPairToLong           - Hex pair to byte (0..255)
-'   [f] HexCharToVal            - Hex char to nibble (0..15)
+'   [F] NormalizePath                   - Normalizes file path or URL (slashes, duplicates, trailing)
+'   [F] SafePathCombine                 - Combines base + relative part safely (absolute passthrough)
+'   [f] IsAbsolutePath                  - Absolute path detection (drive/UNC/URL)
+'   [F] IsNetworkPath                   - UNC detection (\\)
+'   [F] IsSharePointPath                - SharePoint shape detection (URL/UNC)
+'   [F] IsSharePointURLValid            - SharePoint URL shape validation (no open/IO)
+'   [F] ValidateFilePath                - Validates if a file path or URL has a valid format
+'   [f] GetParentFolderPath             - Parent folder for path/URL
+'   [F] GetNameFromURL                  - Extracts last segment (supports URL decode + strip query)
+'   [F] GetFileNameWithoutExt           - Extracts name without extension
+'   [F] DecodeURL                       - Lightweight %XX decoder (+ -> space)
+'   [f] IsHttpUrl                       - Checks http/https
+'   [f] NormalizeUrlSlashes             - Normalizes URL slashes
+'   [f] NormalizeRelativeUrlPiece       - Normalizes relative URL path part
+'   [f] CollapseBackslashesPreserveUNC  - Collapses backslashes preserving UNC prefix
+'   [f] StripUrlQueryFragment           - Removes ?query and #fragment
+'   [f] GetUrlHost                      - Extracts host from URL
+'   [f] ContainsInvalidPathChars        - Windows invalid char / control char check
+'   [f] HexPairToLong                   - Hex pair to byte (0..255)
+'   [f] HexCharToVal                    - Hex char to nibble (0..15)
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
 '       [F]=Public Function, [f]=Private Function
@@ -72,7 +86,7 @@ Option Explicit
 ' 返回          : Boolean - 工作表是否有效，True表示有效（且如果要求可见，则可见）
 ' Purpose       : Validates if a worksheet object is valid, optionally checking if the worksheet is visible
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsWorksheetValid(ByVal ws As Worksheet, _
                                  Optional ByVal checkVisible As Boolean = False, _
@@ -111,9 +125,9 @@ End Function
 '               : outWs - 可选，输出参数，返回找到的工作表对象（未找到则为 Nothing）
 '               : errMsg - 可选，返回错误信息（成功时为空字符串）
 ' 返回          : Boolean - 工作表是否存在，True表示存在
-' Purpose       : Checks if a worksheet exists in a workbook (Worksheets only), optionally returns the worksheet object.
+' Purpose       : Checks if a worksheet exists in a workbook (Worksheets only), optionally returns the worksheet object
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsWorksheetExist(ByVal wb As Workbook, _
                                  ByVal sheetName As String, _
@@ -152,10 +166,11 @@ End Function
 ' 参数          : ws - 目标工作表对象
 '               : targetCol - 可选，目标列（可以是列号或列字母），默认为第1列
 '               : errMsg - 可选，返回错误信息
-' 返回          : Long - 最后非空行号，0表示空表，-1表示工作表处于筛选模式
-' Purpose       : Safely gets the last non-empty row number for a specified column in a worksheet, handles filter mode and empty sheet cases
+' 返回          : Long - 最后非空行号，0表示空表或发生错误（具体原因见errMsg）
+' Purpose       : Safely gets the last non-empty row number for a specified column
+'               : Returns 0 for empty sheet or failure (see errMsg for details)
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetLastRowSafely(ByVal ws As Worksheet, _
                                  Optional ByVal targetCol As Variant = 1, _
@@ -174,7 +189,6 @@ Public Function GetLastRowSafely(ByVal ws As Worksheet, _
     On Error GoTo 0
 
     If isFiltered Then
-        GetLastRowSafely = -1
         errMsg = "Worksheet is in FilterMode."
         Exit Function
     End If
@@ -182,7 +196,11 @@ Public Function GetLastRowSafely(ByVal ws As Worksheet, _
     Dim colNum As Long
     colNum = ResolveColumnIndex(ws, targetCol)
     If colNum <= 0 Then
-        errMsg = "Invalid target column."
+        If IsNumeric(targetCol) Then
+            errMsg = "Target column out of range."
+        Else
+            errMsg = "Target column must be a number or column letters."
+        End If
         Exit Function
     End If
 
@@ -212,10 +230,10 @@ End Function
 ' 参数          : ws - 目标工作表对象
 '               : targetRow - 可选，目标行号，默认为第1行
 '               : errMsg - 可选，返回错误信息
-' 返回          : Long - 最后非空列号，0表示该行全为空
+' 返回          : Long - 最后非空列号，0表示该行全为空或发生错误（具体原因见errMsg）
 ' Purpose       : Safely gets the last non-empty column number for a specified row in a worksheet, handles empty row cases
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetLastColSafely(ByVal ws As Worksheet, _
                                  Optional ByVal targetRow As Variant = 1, _
@@ -231,7 +249,11 @@ Public Function GetLastColSafely(ByVal ws As Worksheet, _
     Dim rowNum As Long
     rowNum = ResolveRowIndex(ws, targetRow)
     If rowNum <= 0 Then
-        errMsg = "Invalid target row."
+        If Not IsNumeric(targetRow) Then
+            errMsg = "Target row must be numeric."
+        Else
+            errMsg = "Target row out of range."
+        End If
         Exit Function
     End If
 
@@ -265,7 +287,7 @@ End Function
 ' 返回          : Boolean - 是否成功找到并获取命名区域，True表示成功
 ' Purpose       : Attempts to get a named range from a workbook or worksheet, supports both sheet-level and workbook-level names
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function TryGetNamedRange(ByVal wbOrWs As Object, _
                                  ByVal rangeName As String, _
@@ -377,7 +399,7 @@ End Function
 ' 返回          : Range - 实际数据区域，若无数据或出错则返回Nothing
 ' Purpose       : Gets the actual data region (CurrentRegion) around a specified address in a worksheet, handles empty cell cases
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetActualDataRangeCore(ByVal ws As Worksheet, _
                                        ByVal startAddress As String, _
@@ -429,6 +451,7 @@ End Function
 ' 参数          : ws - 目标工作表对象
 '               : targetRow - 要解析的行标识（仅支持数值类型）
 ' 返回          : Long - 有效的行号，若无效则返回0
+' Purpose       : Parses/validates row index
 ' ----------------------------------------------------------------------------------------------
 Private Function ResolveRowIndex(ByVal ws As Worksheet, ByVal targetRow As Variant) As Long
     ResolveRowIndex = 0
@@ -445,6 +468,7 @@ End Function
 ' 参数          : ws - 目标工作表对象
 '               : targetCol - 要解析的列标识（数值列号或字符串列字母）
 ' 返回          : Long - 有效的列号，若无效则返回0
+' Purpose       : Parses/validates column index (number or letters)
 ' ----------------------------------------------------------------------------------------------
 Private Function ResolveColumnIndex(ByVal ws As Worksheet, ByVal targetCol As Variant) As Long
     ResolveColumnIndex = 0
@@ -468,6 +492,7 @@ End Function
 ' 功能说明      : 将Excel列字母（如"A", "AB", "XFD"）转换为对应的列号
 ' 参数          : letters - 要转换的列字母字符串
 ' 返回          : Long - 对应的列号，若字母无效则返回0
+' Purpose       : Converts column letters (A..XFD) to number
 ' ----------------------------------------------------------------------------------------------
 Private Function ColumnLettersToNumber(ByVal letters As String) As Long
     letters = UCase$(Trim$(letters))
@@ -490,19 +515,17 @@ End Function
 ' SECTION 02: PATH & URL (PURE)
 ' ==============================================================================================
 
-Private Const SCHEME_HTTP As String = "http://"
-Private Const SCHEME_HTTPS As String = "https://"
-
 ' ----------------------------------------------------------------------------------------------
 ' [F] NormalizePath
 '
 ' 功能说明      : 规范化文件路径或URL，统一路径分隔符，可选保留尾部斜杠
+'               : 注意：对URL，keepTrailingSlash=False 时会移除末尾斜杠（包括 host 根路径）
 ' 参数          : filePath - 要规范化的原始路径字符串
 '               : keepTrailingSlash - 可选，是否保留尾部斜杠，默认为False
 ' 返回          : String - 规范化后的路径（文件路径使用反斜杠，URL保留正斜杠）
 ' Purpose       : Normalizes file path or URL by standardizing separators, optionally preserving trailing slash
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function NormalizePath(ByVal filePath As String, _
                               Optional ByVal keepTrailingSlash As Boolean = False) As String
@@ -518,7 +541,15 @@ Public Function NormalizePath(ByVal filePath As String, _
     isUrl = IsHttpUrl(s)
 
     If isUrl Then
-        NormalizePath = NormalizeUrlSlashes(s)
+        s = NormalizeUrlSlashes(s)
+
+        If keepTrailingSlash Then
+            If Right$(s, 1) <> "/" Then s = s & "/"
+        Else
+            If Right$(s, 1) = "/" Then s = Left$(s, Len(s) - 1)
+        End If
+
+        NormalizePath = s
         Exit Function
     End If
 
@@ -547,7 +578,7 @@ End Function
 ' 返回          : String - 组合后的完整规范化路径
 ' Purpose       : Safely combines two path parts with automatic separator handling and normalization, supports both file paths and URLs
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function SafePathCombine(ByVal path1 As String, ByVal path2 As String) As String
     path1 = Trim$(path1)
@@ -599,6 +630,7 @@ End Function
 ' 功能说明      : 判断给定路径是否为绝对路径（包括URL、UNC路径、驱动器根路径和系统根路径）
 ' 参数          : path - 要检查的路径字符串
 ' 返回          : Boolean - 是否为绝对路径，True表示是绝对路径
+' Purpose       : Absolute path detection (drive/UNC/URL)
 ' ----------------------------------------------------------------------------------------------
 Private Function IsAbsolutePath(ByVal path As String) As Boolean
     Dim s As String
@@ -640,7 +672,7 @@ End Function
 ' 返回          : Boolean - 是否为网络路径，True表示是UNC网络路径
 ' Purpose       : Determines if the given path is a network path (UNC path starting with double backslash)
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsNetworkPath(ByVal filePath As String) As Boolean
     Dim s As String
@@ -659,7 +691,7 @@ End Function
 ' 返回          : Boolean - 是否为SharePoint路径，True表示是SharePoint相关路径
 ' Purpose       : Determines if the given path is a SharePoint path (including HTTP URLs and UNC paths, characterized by "sharepoint" keyword)
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsSharePointPath(ByVal filePath As String) As Boolean
     Dim s As String
@@ -680,11 +712,128 @@ Public Function IsSharePointPath(ByVal filePath As String) As Boolean
 End Function
 
 ' ----------------------------------------------------------------------------------------------
+' [F] IsSharePointURLValid
+'
+' 功能说明      : 验证SharePoint URL的格式是否有效，检查协议、主机名和SharePoint特征
+' 参数          : sharePointUrl - 要验证的SharePoint URL字符串
+'               : errMsg - 可选，返回错误信息
+' 返回          : Boolean - SharePoint URL是否有效，True表示格式正确且包含SharePoint特征
+' Purpose       : Validates if a SharePoint URL has a valid format, checking protocol, hostname, and SharePoint characteristics
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
+' ----------------------------------------------------------------------------------------------
+Public Function IsSharePointURLValid(ByVal sharePointUrl As String, _
+                                     Optional ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
+
+    Dim s As String
+    s = Trim$(sharePointUrl)
+    If Len(s) = 0 Then
+        errMsg = "Empty URL."
+        Exit Function
+    End If
+
+    If Not IsHttpUrl(s) Then
+        errMsg = "Not http/https."
+        Exit Function
+    End If
+
+    s = NormalizeUrlSlashes(s)
+    s = StripUrlQueryFragment(s)
+
+    ' Extract host between "://" and next "/"
+    Dim host As String
+    host = GetUrlHost(s)
+    If Len(host) = 0 Then
+        errMsg = "Missing host."
+        Exit Function
+    End If
+
+    If InStr(1, host, "sharepoint", vbTextCompare) = 0 Then
+        errMsg = "Host does not look like SharePoint."
+        Exit Function
+    End If
+
+    IsSharePointURLValid = True
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [F] ValidateFilePath
+'
+' 功能说明      : 验证文件路径或URL的格式是否有效，检查空路径、非法字符和必要的路径结构
+' 参数          : filePath - 要验证的路径字符串
+'               : errMsg - 可选，返回错误信息
+' 返回          : Boolean - 路径格式是否有效，True表示路径格式正确
+' Purpose       : Validates if a file path or HTTP/HTTPS URL has a valid basic format
+'               : For SharePoint-specific validation, use IsSharePointURLValid
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
+' ----------------------------------------------------------------------------------------------
+Public Function ValidateFilePath(ByVal filePath As String, _
+                                 Optional ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
+
+    Dim s As String
+    s = Trim$(filePath)
+    If Len(s) = 0 Then
+        errMsg = "Empty path."
+        Exit Function
+    End If
+
+    If IsHttpUrl(s) Then
+        s = NormalizeUrlSlashes(s)
+        s = StripUrlQueryFragment(s)
+
+        Dim host As String
+        host = GetUrlHost(s)
+        If Len(host) = 0 Then
+            errMsg = "Missing host."
+            Exit Function
+        End If
+
+        ValidateFilePath = True
+        Exit Function
+    End If
+
+    s = NormalizePath(s, False)
+
+    ' Basic invalid characters for Windows file paths (excluding ":" allowed at drive position)
+    ' < > " | ? *  and control chars
+    If ContainsInvalidPathChars(s) Then
+        errMsg = "Invalid characters in path."
+        Exit Function
+    End If
+
+    ' Drive path like "C:\..."
+    If Len(s) >= 2 And Mid$(s, 2, 1) = ":" Then
+        ValidateFilePath = True
+        Exit Function
+    End If
+
+    ' UNC path "\\server\share\..."
+    If Left$(s, 2) = "\\" Then
+        ' require at least "\\x\y"
+        Dim p As Long
+        p = InStr(3, s, "\")
+        If p > 3 Then
+            ValidateFilePath = True
+        Else
+            errMsg = "UNC path too short."
+        End If
+        Exit Function
+    End If
+
+    ' Relative path allowed? In Core, treat as valid format (caller decides)
+    ValidateFilePath = True
+End Function
+
+' ----------------------------------------------------------------------------------------------
 ' [f] GetParentFolderPath
 '
 ' 功能说明      : 获取给定路径的父文件夹路径，支持文件路径和URL，自动处理不同路径类型的边界情况
 ' 参数          : path - 要获取父文件夹的路径字符串
 ' 返回          : String - 父文件夹路径，若无父文件夹则返回空字符串
+' Purpose       : Parent folder for path/URL
 ' ----------------------------------------------------------------------------------------------
 Private Function GetParentFolderPath(ByVal path As String) As String
     Dim s As String
@@ -739,111 +888,6 @@ Private Function GetParentFolderPath(ByVal path As String) As String
 End Function
 
 ' ----------------------------------------------------------------------------------------------
-' [F] ValidateFilePath
-'
-' 功能说明      : 验证文件路径或URL的格式是否有效，检查空路径、非法字符和必要的路径结构
-' 参数          : filePath - 要验证的路径字符串
-'               : errMsg - 可选，返回错误信息
-' 返回          : Boolean - 路径格式是否有效，True表示路径格式正确
-' Purpose       : Validates if a file path or URL has a valid format, checking for empty path, invalid characters, and required path structure
-' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
-' ----------------------------------------------------------------------------------------------
-Public Function ValidateFilePath(ByVal filePath As String, _
-                                 Optional ByRef errMsg As String) As Boolean
-    errMsg = vbNullString
-
-    Dim s As String
-    s = Trim$(filePath)
-    If Len(s) = 0 Then
-        errMsg = "Empty path."
-        Exit Function
-    End If
-
-    If IsHttpUrl(s) Then
-        ValidateFilePath = IsSharePointURLValid(s, errMsg)
-        Exit Function
-    End If
-
-    s = NormalizePath(s, False)
-
-    ' Basic invalid characters for Windows file paths (excluding ":" allowed at drive position)
-    ' < > " | ? *  and control chars
-    If ContainsInvalidPathChars(s) Then
-        errMsg = "Invalid characters in path."
-        Exit Function
-    End If
-
-    ' Drive path like "C:\..."
-    If Len(s) >= 2 And Mid$(s, 2, 1) = ":" Then
-        ValidateFilePath = True
-        Exit Function
-    End If
-
-    ' UNC path "\\server\share\..."
-    If Left$(s, 2) = "\\" Then
-        ' require at least "\\x\y"
-        Dim p As Long
-        p = InStr(3, s, "\")
-        If p > 3 Then
-            ValidateFilePath = True
-        Else
-            errMsg = "UNC path too short."
-        End If
-        Exit Function
-    End If
-
-    ' Relative path allowed? In Core, treat as valid format (caller decides)
-    ValidateFilePath = True
-End Function
-
-' ----------------------------------------------------------------------------------------------
-' [F] IsSharePointURLValid
-'
-' 功能说明      : 验证SharePoint URL的格式是否有效，检查协议、主机名和SharePoint特征
-' 参数          : sharePointUrl - 要验证的SharePoint URL字符串
-'               : errMsg - 可选，返回错误信息
-' 返回          : Boolean - SharePoint URL是否有效，True表示格式正确且包含SharePoint特征
-' Purpose       : Validates if a SharePoint URL has a valid format, checking protocol, hostname, and SharePoint characteristics
-' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
-' ----------------------------------------------------------------------------------------------
-Public Function IsSharePointURLValid(ByVal sharePointUrl As String, _
-                                     Optional ByRef errMsg As String) As Boolean
-    errMsg = vbNullString
-
-    Dim s As String
-    s = Trim$(sharePointUrl)
-    If Len(s) = 0 Then
-        errMsg = "Empty URL."
-        Exit Function
-    End If
-
-    If Not IsHttpUrl(s) Then
-        errMsg = "Not http/https."
-        Exit Function
-    End If
-
-    s = NormalizeUrlSlashes(s)
-    s = StripUrlQueryFragment(s)
-
-    ' Extract host between "://" and next "/"
-    Dim host As String
-    host = GetUrlHost(s)
-    If Len(host) = 0 Then
-        errMsg = "Missing host."
-        Exit Function
-    End If
-
-    If InStr(1, host, "sharepoint", vbTextCompare) = 0 Then
-        errMsg = "Host does not look like SharePoint."
-        Exit Function
-    End If
-
-    IsSharePointURLValid = True
-End Function
-
-' ----------------------------------------------------------------------------------------------
 ' [F] GetNameFromURL
 '
 ' 功能说明      : 从文件路径或URL中提取文件名或最后一部分名称，支持URL解码和参数清理
@@ -851,7 +895,7 @@ End Function
 ' 返回          : String - 提取的文件名或URL最后一部分，对URL自动解码并去除查询参数
 ' Purpose       : Extracts the file name or last part from a file path or URL, supports URL decoding and query parameter cleanup
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetNameFromURL(ByVal filePath As String) As String
     Dim s As String
@@ -890,7 +934,7 @@ End Function
 ' 返回          : String - 不带扩展名的文件名，若无扩展名则返回完整文件名
 ' Purpose       : Extracts the file name without extension from a file path
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetFileNameWithoutExt(ByVal filePath As String) As String
     Dim fn As String
@@ -911,11 +955,13 @@ End Function
 '
 ' 功能说明      : 解码URL编码的字符串，将%XX形式的编码和加号(+)转换为原始字符
 '               : 只保证常见的ASCII %20、%2F等，复杂UTF-8编码不保证完全正确（但也不会崩溃），适用于解码文件名等简单URL组件
+'               : 高字节字符（>0x7F）按系统 ANSI 代码页解码，而非 UTF-8 多字节解码
 ' 参数          : inputUrl - 要解码的URL编码字符串
 ' 返回          : String - 解码后的原始字符串
-' Purpose       : Decodes a URL-encoded string, converting %XX encoded sequences and plus signs to original characters
+' Purpose       : Decodes URL-encoded string (basic implementation)
+'               : High-byte values (>0x7F) are decoded using system ANSI code page, not full UTF-8 multi-byte decoding
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function DecodeURL(ByVal inputUrl As String) As String
     Dim s As String
@@ -972,6 +1018,7 @@ End Function
 ' 功能说明      : 判断字符串是否为 HTTP 或 HTTPS URL（内部自动 Trim 与小写化处理）
 ' 参数          : s - 待判断的字符串
 ' 返回          : Boolean - True 表示为 http:// 或 https:// 开头的 URL
+' Purpose       : Checks http/https
 ' ----------------------------------------------------------------------------------------------
 Private Function IsHttpUrl(ByVal s As String) As Boolean
     ' 防御性处理：自动去除首尾空格并统一为小写
@@ -989,6 +1036,7 @@ End Function
 ' 功能说明      : 规范化URL中的斜杠，将反斜杠转换为正斜杠，并折叠连续的斜杠
 ' 参数          : url - 要规范化的URL字符串
 ' 返回          : String - 斜杠规范化后的URL
+' Purpose       : Normalizes URL slashes
 ' ----------------------------------------------------------------------------------------------
 Private Function NormalizeUrlSlashes(ByVal url As String) As String
     Dim s As String
@@ -1021,6 +1069,7 @@ End Function
 ' 功能说明      : 规范化URL的相对路径部分，将反斜杠转换为正斜杠，并去除开头的斜杠
 ' 参数          : piece - 要规范化的相对路径字符串
 ' 返回          : String - 规范化后的相对路径，无开头的斜杠
+' Purpose       : Normalizes relative URL path part
 ' ----------------------------------------------------------------------------------------------
 Private Function NormalizeRelativeUrlPiece(ByVal piece As String) As String
     Dim s As String
@@ -1041,6 +1090,7 @@ End Function
 ' 功能说明      : 折叠路径中的连续反斜杠为单个反斜杠，同时保留UNC路径的双反斜杠前缀
 ' 参数          : path - 要处理的路径字符串
 ' 返回          : String - 反斜杠折叠后的路径，UNC路径前缀保持双反斜杠
+' Purpose       : Collapses backslashes preserving UNC prefix
 ' ----------------------------------------------------------------------------------------------
 Private Function CollapseBackslashesPreserveUNC(ByVal path As String) As String
     Dim s As String
@@ -1069,6 +1119,7 @@ End Function
 ' 功能说明      : 去除URL中的查询参数（?后）和片段标识（#后），只保留基础路径部分
 ' 参数          : urlOrPart - 要处理的URL字符串
 ' 返回          : String - 去除查询参数和片段标识后的URL基础部分
+' Purpose       : Removes ?query and #fragment
 ' ----------------------------------------------------------------------------------------------
 Private Function StripUrlQueryFragment(ByVal urlOrPart As String) As String
     Dim s As String
@@ -1101,6 +1152,7 @@ End Function
 ' 功能说明      : 从URL中提取主机名（域名或IP地址部分）
 ' 参数          : url - 要提取主机名的URL字符串
 ' 返回          : String - URL中的主机名，若无协议或格式错误则返回空字符串
+' Purpose       : Extracts host from URL
 ' ----------------------------------------------------------------------------------------------
 Private Function GetUrlHost(ByVal url As String) As String
     Dim s As String
@@ -1128,6 +1180,7 @@ End Function
 ' 功能说明      : 检查字符串是否包含Windows文件路径中的非法字符（控制字符及 " * < > ? |）
 ' 参数          : s - 要检查的字符串
 ' 返回          : Boolean - 是否包含非法字符，True表示包含
+' Purpose       : Windows invalid char / control char check
 ' ----------------------------------------------------------------------------------------------
 Private Function ContainsInvalidPathChars(ByVal s As String) As Boolean
     ' Windows invalids: < > " | ? * and control chars (0-31)
@@ -1152,6 +1205,7 @@ End Function
 ' 参数          : h1 - 第一个十六进制字符（高位）
 '               : h2 - 第二个十六进制字符（低位）
 ' 返回          : Long - 转换后的字节值，若字符无效则返回-1
+' Purpose       : Hex pair to byte (0..255)
 ' ----------------------------------------------------------------------------------------------
 Private Function HexPairToLong(ByVal h1 As String, ByVal h2 As String) As Long
     Dim v1 As Long, v2 As Long
@@ -1173,6 +1227,7 @@ End Function
 ' 功能说明      : 将单个十六进制字符（0-9, A-F, a-f）转换为对应的数值（0-15）
 ' 参数          : h - 要转换的十六进制字符
 ' 返回          : Long - 转换后的数值，若字符无效则返回-1
+' Purpose       : Hex char to nibble (0..15)
 ' ----------------------------------------------------------------------------------------------
 Private Function HexCharToVal(ByVal h As String) As Long
     Dim c As Integer
