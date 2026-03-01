@@ -12,11 +12,20 @@ Attribute VB_Name = "core_utils"
 ' ==============================================================================================
 ' VERSION HISTORY   :
 ' v1.0.0
-'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+'   - Init (Legacy Baseline): Migrated utility helpers from monolithic codebase;
+'                             established safe array handling, type conversion,
+'                             validation and safe math foundations.
+'   - Init (Design): Adopted query-only philosophy (no IO, no Application state mutation).
+'   - Init (Sentinel): Introduced EMPTY_VALUE as unified failure sentinel.
+'   - Init (Scope): Standardized 1D/2D Variant array conventions (Excel-centric assumptions).
 
 ' v2.0.0
-'   - Refactor: split project into layered architecture (Core / Platform / Business).
-'   - Freeze: stabilized array inspect/transform, conversion/validate, safe math utilities.
+'   - Refactor (Architecture): Extracted into Core layer under layered model
+'                               (Core / Platform / Business).
+'   - Refactor (Structure): Grouped utilities into Array / Conversion / Validation /
+'                           SafeMath sections with consistent contracts.
+'   - Freeze (Contract): Unified failure semantics (EMPTY_VALUE or Boolean False + errMsg).
+'   - Freeze (Determinism): Removed implicit side effects and standardized errMsg patterns.
 
 ' v2.1.0
 '   - Fix (Contract): EnsureArrayDimensions is now truly query-only (no ByRef mutation);
@@ -78,6 +87,8 @@ Attribute VB_Name = "core_utils"
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
 '       [F]=Public Function, [f]=Private Function, [T]=Type
+'       Rule: Helper functions and private procedures inherit the Contract and
+'             Side Effects of their parent public API unless explicitly stated otherwise.
 ' ==============================================================================================
 Option Explicit
 

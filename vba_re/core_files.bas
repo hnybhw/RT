@@ -12,12 +12,20 @@ Attribute VB_Name = "core_files"
 ' ==============================================================================================
 ' VERSION HISTORY   :
 ' v1.0.0
-'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+'   - Init (Legacy Baseline): Migrated Excel query helpers and path parsing utilities
+'                             from legacy implementation.
+'   - Init (Scope): Defined query-only Excel object inspection (Workbook/Worksheet/Range/Name).
+'   - Init (Path Logic): Implemented string-only path and URL parsing helpers
+'                        without filesystem or network access.
+'   - Init (Separation): Established principle that accessibility checks belong outside Core.
 
 ' v2.0.0
-'   - Refactor: split project into layered architecture (Core / Platform / Business).
-'   - Freeze: query-only Excel helpers + pure path/URL parsing/shape-validation.
-'   - Merge: previous path/url sections consolidated into SECTION 02.
+'   - Refactor (Architecture): Extracted into Core layer under layered model
+'                               (Core / Platform / Business).
+'   - Refactor (Structure): Consolidated path/URL helpers into dedicated section (SECTION 02).
+'   - Freeze (Contract): Standardized 0-return semantics for query failures with errMsg reporting.
+'   - Freeze (Boundary): Clarified strict separation between string validation (Core)
+'                        and IO/accessibility checks (Platform).
 
 ' v2.1.0
 '   - Fix (Contract): GetLastRowSafely no longer returns -1 for FilterMode;
@@ -69,6 +77,8 @@ Attribute VB_Name = "core_files"
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
 '       [F]=Public Function, [f]=Private Function
+'       Rule: Helper functions and private procedures inherit the Contract and
+'             Side Effects of their parent public API unless explicitly stated otherwise.
 ' ==============================================================================================
 Option Explicit
 

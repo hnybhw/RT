@@ -12,11 +12,19 @@ Attribute VB_Name = "core_logging"
 ' ==============================================================================================
 ' VERSION HISTORY   :
 ' v1.0.0
-'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+'   - Init (Legacy Baseline): Migrated basic log formatting and timer helpers
+'                             from monolithic implementation.
+'   - Init (Scope): Introduced side-effect-free log line formatting contract.
+'   - Init (Capability): Added lightweight performance timing based on VBA.Timer.
+'   - Init (Boundary): Defined separation between formatting (Core) and log sinks (external).
 
 ' v2.0.0
-'   - Refactor: split project into layered architecture (Core / Platform / Business).
-'   - Freeze: standardized log line formatting + context serialization + timer capability.
+'   - Refactor (Architecture): Extracted into Core layer under layered model
+'                               (Core / Platform / Business).
+'   - Refactor (Structure): Standardized log level helpers (Info/Warn/Error/Debug)
+'                           with consistent formatting pipeline.
+'   - Freeze (Contract): Established formatting-only responsibility; no IO allowed in Core.
+'   - Freeze (Timer): Formalized timer lifecycle contract (Start / Elapsed / Clear).
 
 ' v2.1.0
 '   - Fix (Contract): StartTimer/ElapsedTime/ClearTimers contracts corrected to
@@ -50,6 +58,8 @@ Attribute VB_Name = "core_logging"
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
 '       [F]=Public Function, [f]=Private Function
+'       Rule: Helper functions and private procedures inherit the Contract and
+'             Side Effects of their parent public API unless explicitly stated otherwise.
 ' ==============================================================================================
 Option Explicit
 #Const DEBUG_MODE = False       ' Note: Override via Project Properties > Compile > Conditional Compilation Arguments: DEBUG_MODE=-1
