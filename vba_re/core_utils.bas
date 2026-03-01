@@ -11,12 +11,35 @@ Attribute VB_Name = "core_utils"
 ' STATUS            : Frozen
 ' ==============================================================================================
 ' VERSION HISTORY   :
+' v1.0.0
+'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+
 ' v2.0.0
 '   - Refactor: split project into layered architecture (Core / Platform / Business).
 '   - Freeze: stabilized array inspect/transform, conversion/validate, safe math utilities.
-'
-' v1.0.0
-'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+
+' v2.1.0
+'   - Fix (Contract): EnsureArrayDimensions is now truly query-only (no ByRef mutation);
+'                     signature changed to return Variant (resized copy) and uses EMPTY_VALUE on failure.
+'   - Fix (Reliability): GetArrayInfo narrows On Error Resume Next scope to bounds calls only and
+'                        captures Err.Number before On Error GoTo 0 (prevents silent mis-detection).
+'   - Fix (Consistency): All public functions with errMsg now initialize errMsg = vbNullString at entry.
+'   - Fix (Observability): SliceArraySafe adds Optional ByRef wasClamped to report safe-size clamping;
+'                          SliceArraySafeFull forwards wasClamped to callers.
+'   - Fix (Array Transform): AppendArrayVertical fixes NormalizeTo1Based call signature mismatch;
+'                            avoids errMsg overwrite (separate bErr/aErr), unifies failure sentinel to EMPTY_VALUE,
+'                            and adds Optional ByRef wasDowngraded to expose fallback/row-clamp truncation.
+'   - Fix (Text): SanitizeString restores documented RegExp path; adds TryCreateRegExp helper and
+'                 falls back to SanitizeStringFallback when RegExp is unavailable.
+'   - Fix (Safety): CalculateSafeArraySize adds final product validation (CDbl multiply check) to avoid Long overflow
+'                   when maxElements is customized.
+'   - Fix (Determinism): CoerceLongOrDefault rejects non-integer numeric inputs and guards Long range
+'                        (prevents banker rounding surprises / implicit truncation).
+'   - Fix (Sentinel): EMPTY_VALUE changed from invalid Variant Const to Property Get (stable sentinel semantics).
+'   - Fix (Conversion): ToSafeLong rejects non-integer numeric inputs to avoid banker rounding; vbDate is explicitly
+'                       not supported to prevent unintended date-serial coercion.
+'   - Fix (SafeMath): SafeMultiply/SafeAdd add error guards and stronger finite/overflow handling;
+'                     IsFiniteDouble comment corrected (returns False for NaN and +/-Inf).
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
@@ -24,17 +47,18 @@ Attribute VB_Name = "core_utils"
 '   [T] ArrayInfo               - Array metadata (dims/bounds/counts)
 '   [F] GetArrayInfo            - Fast array inspection (0/1/2D; allocated/bounds)
 '   [F] IsArrayValid            - Validates array allocation/dimension/data requirements
-'   [F] EnsureArrayDimensions   - Ensures array is 2D and meets minimum size (copy/expand)
+'   [f] GetArrayDimensions      - Returns dimension count of an array
+'   [F] EnsureArrayDimensions   - Ensures array meets minimum size; returns a resized copy if needed (no mutation)
 '   [F] CalculateSafeArraySize  - Clamps requested size to safe maximum elements
 '
 ' SECTION 02: ARRAY TRANSFORM
 '   [F] NormalizeTo1Based       - Normalizes array to 1-based 2D (1D upcasts to Nx1)
 '   [f] Normalize1DArray        - Helper: 1D -> 2D (Nx1), 1-based
 '   [f] Normalize2DArray        - Helper: 2D -> 2D, 1-based
-'   [F] SliceArraySafe          - Slice a 2D array safely with bounds validation, returning a 1-based copy
+'   [F] SliceArraySafe          - Safe slice; returns 1-based copy (optional wasClamped flag when clamped)
 '   [f] CoerceLongOrDefault     - Safely coerce optional Variant inputs to Long without raising type errors
-'   [F] SliceArraySafeFull      - Convenience wrapper for full-range safe slicing (returns a 1-based copy)
-'   [F] AppendArrayVertical     - Vertical concat (supports 1D/2D mix, logical cols match)
+'   [F] SliceArraySafeFull      - Full-range safe slice (returns 1-based copy; optional wasClamped flag)
+'   [F] AppendArrayVertical     - Vertical concat; returns 1-based 2D (optional wasDowngraded flag on fallback)
 '
 ' SECTION 03: CONVERT VALIDATE
 '   [F] ToSafeLong              - Safe Long conversion with range check
@@ -43,6 +67,7 @@ Attribute VB_Name = "core_utils"
 '   [F] IsNumericSafe           - Safe IsNumeric check
 '   [F] IsDateSafe              - Safe IsDate check
 '   [F] SanitizeString          - Removes control chars using RegExp (fallback supported)
+'   [f] TryCreateRegExp         - Attempts to create a VBScript RegExp object, returns Nothing on failure
 '   [f] SanitizeStringFallback  - Loop-based sanitizer fallback
 '   [f] ParseBoolean            - Helper: parses common boolean representations
 '
@@ -55,7 +80,10 @@ Attribute VB_Name = "core_utils"
 '       [F]=Public Function, [f]=Private Function, [T]=Type
 ' ==============================================================================================
 Option Explicit
-Public Const EMPTY_VALUE As Variant = Empty
+
+Public Property Get EMPTY_VALUE() As Variant
+    EMPTY_VALUE = Empty
+End Property
 
 ' ==============================================================================================
 ' SECTION 01: ARRAY INSPECT VALIDATE
@@ -67,6 +95,7 @@ Public Const EMPTY_VALUE As Variant = Empty
 ' 功能说明      : 数组信息结构体，用于存储数组的维度、上下界及元素数量
 ' 参数          : None - 这是一个类型定义，无参数
 ' 返回          : 类型 - 用户自定义类型，包含数组状态和边界信息
+' Purpose       : Array metadata (dims/bounds/counts)
 ' ----------------------------------------------------------------------------------------------
 Public Type ArrayInfo
     IsArray As Boolean
@@ -92,7 +121,7 @@ End Type
 ' 返回          : Boolean - 是否成功获取数组信息，True表示数组已分配
 ' Purpose       : Retrieves dimension, bounds and count information of an array
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetArrayInfo(ByRef arr As Variant, _
                              ByRef info As ArrayInfo, _
@@ -112,48 +141,59 @@ Public Function GetArrayInfo(ByRef arr As Variant, _
     End If
     info.IsArray = True
 
-    On Error Resume Next
-    Err.Clear
-
+    ' NOTE: capture Err.Number before On Error GoTo 0 (do not rely on Err state after reset)
     ' ---- Dim 1 (required)
+    Dim e As Long
+
+    Err.Clear
+    On Error Resume Next
     info.LBound1 = LBound(arr, 1)
-    If Err.Number <> 0 Then
-        Err.Clear
+    e = Err.Number
+    On Error GoTo 0
+    If e <> 0 Then
         errMsg = "Array not allocated (dim1 bounds unreadable)."
-        GoTo Finalize
+        Exit Function
     End If
 
+    Err.Clear
+    On Error Resume Next
     info.UBound1 = UBound(arr, 1)
-    If Err.Number <> 0 Then
-        Err.Clear
+    e = Err.Number
+    On Error GoTo 0
+    If e <> 0 Then
         errMsg = "Array dim1 UBound unreadable."
-        GoTo Finalize
+        Exit Function
     End If
 
-    info.Dims = 1
     info.Count1 = info.UBound1 - info.LBound1 + 1
     If info.Count1 < 0 Then info.Count1 = 0
+    info.Dims = 1
 
-    ' ---- Dim 2 (best-effort; stop here intentionally)
+    ' ---- Dim 2 (best-effort)
+    Err.Clear
+    On Error Resume Next
     info.LBound2 = LBound(arr, 2)
-    If Err.Number = 0 Then
+    e = Err.Number
+    On Error GoTo 0
+
+    If e = 0 Then
+        Err.Clear
+        On Error Resume Next
         info.UBound2 = UBound(arr, 2)
-        If Err.Number = 0 Then
-            info.Dims = 2
+        e = Err.Number
+        On Error GoTo 0
+
+        If e = 0 Then
             info.Count2 = info.UBound2 - info.LBound2 + 1
             If info.Count2 < 0 Then info.Count2 = 0
+            info.Dims = 2
         Else
             ' rare: LBound2 ok but UBound2 fails => keep as 1D; clear and keep defaults
-            Err.Clear
             info.LBound2 = 0: info.UBound2 = -1: info.Count2 = 0
         End If
     Else
-        Err.Clear
         info.LBound2 = 0: info.UBound2 = -1: info.Count2 = 0
     End If
-
-Finalize:
-    On Error GoTo 0
 
     info.IsAllocated = (info.Dims > 0)
     GetArrayInfo = info.IsAllocated
@@ -170,12 +210,13 @@ End Function
 ' 返回          : Boolean - 数组是否有效，True表示满足所有验证条件
 ' Purpose       : Validates if an array meets specified criteria including dimensions and data presence
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsArrayValid(ByRef arr As Variant, _
                              Optional ByVal requireData As Boolean = True, _
                              Optional ByVal require2D As Boolean = False, _
                              Optional ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
     Dim info As ArrayInfo
     If Not GetArrayInfo(arr, info, errMsg) Then Exit Function
 
@@ -204,6 +245,7 @@ End Function
 ' 功能说明      : 获取数组的维度数量
 ' 参数          : arr - 要检查的数组变量
 ' 返回          : Long - 数组的维度数，0表示非数组或未分配数组
+' Purpose       : Returns dimension count of an array
 ' ----------------------------------------------------------------------------------------------
 Private Function GetArrayDimensions(ByRef arr As Variant) As Long
     Dim info As ArrayInfo
@@ -217,35 +259,42 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 ' [F] EnsureArrayDimensions
 '
-' 功能说明      : 确保数组具有指定的最小行数和列数，必要时重新创建或扩展数组
-' 参数          : arr - 要检查和调整的数组变量
+' 功能说明      : 确保数组具有指定的最小行数和列数；必要时返回重新创建/扩展后的新数组副本
+'               : - 若输入非数组或未分配数组：返回 1-based(minRows x minCols) 新数组
+'               : - 若输入为 1D：升级为 2D（rows x minCols），数据写入第1列
+'               : - 若输入为 2D：如尺寸不足则返回扩展后的 1-based 新数组（原数据拷贝到左上角）
+'               : - Does not rebase existing arrays; new arrays are always 1-based
+' 参数          : arr - 要检查的数组变量（不会被原地修改）
 '               : minRows - 可选，要求的最小行数，默认为1
 '               : minCols - 可选，要求的最小列数，默认为1
 '               : errMsg - 可选，返回错误信息
-' 返回          : Boolean - 是否成功确保数组维度，True表示数组已满足或调整为所需尺寸
-' Purpose       : Ensures an array has at least the specified minimum rows and columns, recreating or resizing if necessary
+' 返回          : Variant - 返回满足要求的数组（可能是原数组，也可能是新数组副本）；失败返回 EMPTY_VALUE
+' Purpose       : Ensures an array has at least the specified minimum rows and columns, returning a resized copy if necessary.
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only) - Does NOT mutate input array
 ' ----------------------------------------------------------------------------------------------
-Public Function EnsureArrayDimensions(ByRef arr As Variant, _
+Public Function EnsureArrayDimensions(ByVal arr As Variant, _
                                       Optional ByVal minRows As Long = 1, _
                                       Optional ByVal minCols As Long = 1, _
-                                      Optional ByRef errMsg As String) As Boolean
+                                      Optional ByRef errMsg As String) As Variant
+    On Error GoTo Fail
+
     errMsg = vbNullString
     If minRows < 1 Then minRows = 1
     If minCols < 1 Then minCols = 1
 
     Dim info As ArrayInfo
     If Not GetArrayInfo(arr, info, errMsg) Then
-        ReDim arr(1 To minRows, 1 To minCols)
-        EnsureArrayDimensions = True
+        Dim created() As Variant
+        ReDim created(1 To minRows, 1 To minCols)
+        EnsureArrayDimensions = created
         Exit Function
     End If
 
-    ' Fast exit: already good 2D capacity
+    ' Fast exit: already good capacity (keep original array; do not normalize/mutate)
     If info.Dims = 2 Then
         If info.Count1 >= minRows And info.Count2 >= minCols Then
-            EnsureArrayDimensions = True
+            EnsureArrayDimensions = arr
             Exit Function
         End If
     End If
@@ -254,6 +303,7 @@ Public Function EnsureArrayDimensions(ByRef arr As Variant, _
     targetRows = info.Count1
     If targetRows < minRows Then targetRows = minRows
 
+    ' 1D -> 2D (NxminCols)
     If info.Dims = 1 Then
         targetCols = minCols
 
@@ -268,12 +318,11 @@ Public Function EnsureArrayDimensions(ByRef arr As Variant, _
             Next r
         End If
 
-        arr = newFrom1D
-        EnsureArrayDimensions = True
+        EnsureArrayDimensions = newFrom1D
         Exit Function
     End If
 
-    ' 2D resize path
+    ' 2D resize path (return a new 1-based copy)
     targetCols = info.Count2
     If targetCols < minCols Then targetCols = minCols
 
@@ -292,8 +341,12 @@ Public Function EnsureArrayDimensions(ByRef arr As Variant, _
         Next rr
     End If
 
-    arr = new2D
-    EnsureArrayDimensions = True
+    EnsureArrayDimensions = new2D
+    Exit Function
+
+Fail:
+    errMsg = Err.Description
+    EnsureArrayDimensions = EMPTY_VALUE
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -331,28 +384,34 @@ Public Function CalculateSafeArraySize(ByVal requestedRows As Long, _
     safeRows = requestedRows
     If safeRows > maxRows Then safeRows = maxRows
 
+    If CDbl(safeRows) * CDbl(safeCols) > CDbl(maxElements) Then
+    ' 优先保列（通常列更“结构性”），再压行
+        safeRows = CLng(CDbl(maxElements) / CDbl(safeCols))
+        If safeRows < 1 Then safeRows = 1
+    End If
+
     result(1) = safeRows
     result(2) = safeCols
     CalculateSafeArraySize = result
 End Function
 
 ' ==============================================================================================
-' SECTION 02: ARRAYS TRANSFORM
+' SECTION 02: ARRAY TRANSFORM
 ' ==============================================================================================
 
 ' ----------------------------------------------------------------------------------------------
 ' [F] NormalizeTo1Based
 '
-' 功能说明      : 将数组标准化为 1-based 结构，便于后续统一处理。
+' 功能说明      : 将数组标准化为 1-based 结构，便于后续统一处理
 '               : - 1D 数组：始终升级为二维 1-based (rows x 1)
 '               : - 2D 数组：如需则重建为二维 1-based
 '               : - 其他维度：保持原样返回
 ' 参数          : arr - 原始数组（可为 0-based / 1-based / 1D / 2D）
 '               : makeCopy - 是否强制重建副本（对 2D 且已 1-based 时有意义）
 ' 返回          : Variant - 标准化后的数组（1D -> 2D Nx1；2D -> 2D 1-based）
-' Purpose       : Normalize arrays into a consistent 1-based shape (1D upcasts to Nx1 2D).
-' Contract      : Core / Query-only.
-' Side Effects  : None (Query-only).
+' Purpose       : Normalize arrays into a consistent 1-based shape (1D upcasts to Nx1 2D)
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function NormalizeTo1Based(ByVal arr As Variant, Optional ByVal makeCopy As Boolean = False) As Variant
 
@@ -400,12 +459,13 @@ End Function
 ' 参数          : arr - 原始一维数组
 '               : info - 包含原始数组边界信息的结构体
 ' 返回          : Variant - 二维单列数组(rows x 1)，行数与原数组元素数相同
+' Purpose       : Helper: 1D -> 2D (Nx1), 1-based
 ' ----------------------------------------------------------------------------------------------
 Private Function Normalize1DArray(ByRef arr As Variant, ByRef info As ArrayInfo) As Variant
     Dim rows As Long
     rows = info.Count1
     If rows <= 0 Then
-        Normalize1DArray = Empty
+        Normalize1DArray = EMPTY_VALUE
         Exit Function
     End If
 
@@ -428,13 +488,14 @@ End Function
 ' 参数          : arr - 原始二维数组
 '               : info - 包含原始数组边界信息的结构体
 ' 返回          : Variant - 索引从1开始的二维数组
+' Purpose       : Helper: 2D -> 2D, 1-based
 ' ----------------------------------------------------------------------------------------------
 Private Function Normalize2DArray(ByRef arr As Variant, ByRef info As ArrayInfo) As Variant
     Dim rows As Long, cols As Long
     rows = info.Count1
     cols = info.Count2
     If rows <= 0 Or cols <= 0 Then
-        Normalize2DArray = Empty
+        Normalize2DArray = EMPTY_VALUE
         Exit Function
     End If
 
@@ -462,24 +523,29 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 ' [F] SliceArraySafe
 '
-' 功能说明      : 安全切片（带边界检查），从源二维数组中提取指定行/列范围，返回 1-based 新数组。
-'               : rowStart/rowEnd/colStart/colEnd 允许省略（Missing/Empty/Null），省略时使用源数组边界。
+' 功能说明      : 安全切片（带边界检查），从源二维数组中提取指定行/列范围，返回 1-based 新数组
+'               : rowStart/rowEnd/colStart/colEnd 允许省略（Missing/Empty/Null），省略时使用源数组边界
 '               : 若输入参数非法（如非数值字符串）或范围越界，则返回 EMPTY_VALUE。
+'               : 若源数组过大导致触发安全尺寸限制，会进行 clamp（截断），并通过 wasClamped=True 告知调用方
 ' 参数          : arr - 源数组（必须为已分配二维数组）
 '               : rowStart - 起始行（可选）
 '               : rowEnd - 结束行（可选）
 '               : colStart - 起始列（可选）
 '               : colEnd - 结束列（可选）
+'               : wasClamped - 可选 ByRef 输出：True=发生过安全截断；False=未截断
 ' 返回          : Variant - 切片后的 1-based 数组；失败返回 EMPTY_VALUE
-' Purpose       : Slice a 2D array safely with bounds validation, returning a 1-based copy.
-' Contract      : Core / Query-only.
-' Side Effects  : None (Query-only).
+' Purpose       : Slice a 2D array safely with bounds validation, returning a 1-based copy
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function SliceArraySafe(ByVal arr As Variant, _
                               Optional ByVal rowStart As Variant, _
                               Optional ByVal rowEnd As Variant, _
                               Optional ByVal colStart As Variant, _
-                              Optional ByVal colEnd As Variant) As Variant
+                              Optional ByVal colEnd As Variant, _
+                              Optional ByRef wasClamped As Boolean = False) As Variant
+
+    wasClamped = False
 
     ' 源数组必须是已分配 2D 且有数据
     If Not IsArrayValid(arr, requireData:=True, require2D:=True) Then
@@ -565,10 +631,16 @@ Public Function SliceArraySafe(ByVal arr As Variant, _
         Exit Function
     End If
 
-    If safeSize(1) < rowCount Then rowCount = safeSize(1)
-    If safeSize(2) < colCount Then colCount = safeSize(2)
+    If safeSize(1) < rowCount Then
+        rowCount = safeSize(1)
+        wasClamped = True
+    End If
+    If safeSize(2) < colCount Then
+        colCount = safeSize(2)
+        wasClamped = True
+    End If
 
-    ' 调整实际结束位置（静默截断）
+    ' 调整实际结束位置（截断后同步调整）
     re = rs + rowCount - 1
     ce = cs + colCount - 1
 
@@ -588,21 +660,20 @@ Public Function SliceArraySafe(ByVal arr As Variant, _
     Next r
 
     SliceArraySafe = result
-
 End Function
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] CoerceLongOrDefault
 '
-' 功能说明      : 将 Variant 参数安全解析为 Long；若为 Missing/Empty/Null 则使用默认值；
+' 功能说明      : 将 Variant 参数安全解析为 Long；若为 Missing/Empty/Null 则使用默认值
 '               : 若非数值则返回 ok=False（不抛异常）
 ' 参数          : v - 输入 Variant（可能 Missing/Empty/Null/String/Number）
 '               : defVal - 缺省时使用的默认值
 '               : ok - ByRef 输出，True=成功解析/采用默认值，False=非法输入
 ' 返回          : Long - 解析结果或默认值
+' Purpose       : Safely coerce optional Variant inputs to Long without raising type errors
 ' ----------------------------------------------------------------------------------------------
 Private Function CoerceLongOrDefault(ByVal v As Variant, ByVal defVal As Long, ByRef ok As Boolean) As Long
-
     ok = True
 
     If IsMissing(v) Or IsEmpty(v) Or IsNull(v) Then
@@ -611,63 +682,102 @@ Private Function CoerceLongOrDefault(ByVal v As Variant, ByVal defVal As Long, B
     End If
 
     If IsNumeric(v) Then
-        ' CLng 在此处不会因类型不匹配崩溃；若是极端字符串数值如 "10" 也可正常处理
-        CoerceLongOrDefault = CLng(v)
+        Dim d As Double
+        d = CDbl(v)
+
+        ' 必须是整数（避免 2.5 之类导致静默舍入）
+        If d <> Fix(d) Then
+            ok = False
+            Exit Function
+        End If
+
+        ' 范围保护（避免 CDbl->CLng 溢出）
+        If d < -2147483648# Or d > 2147483647# Then
+            ok = False
+            Exit Function
+        End If
+
+        CoerceLongOrDefault = CLng(d)
         Exit Function
     End If
 
     ok = False
-
 End Function
 
 ' ----------------------------------------------------------------------------------------------
 ' [F] SliceArraySafeFull
 '
-' 功能说明      : 返回源数组的完整切片副本（等价于 SliceArraySafe(arr) 省略所有范围参数）。
+' 功能说明      : 返回源数组的完整切片副本（等价于调用 SliceArraySafe(arr) 且省略所有范围参数）
 '               : - 仅接受已分配二维数组
 '               : - 返回 1-based 新数组（完整复制）
 '               : - 若源数组无效则返回 EMPTY_VALUE
-'               : - 若源数组过大，仍会遵循 SliceArraySafe 的安全截断策略（silent clamp）
+'               : - 若源数组过大，仍会遵循 SliceArraySafe 的安全尺寸限制策略（可能发生截断），
+'                 且可通过 wasClamped 输出参数获知是否发生截断
 ' 参数          : arr - 源数组（必须为已分配二维数组）
+'               : wasClamped - 可选 ByRef 输出：True=发生过安全截断；False=未截断
 ' 返回          : Variant - 完整副本（1-based 2D）；失败返回 EMPTY_VALUE
-' Purpose       : Convenience wrapper for full-range safe slicing (returns a 1-based copy).
-' Contract      : Core / Query-only.
-' Side Effects  : None (Query-only).
+' Purpose       : Full-range safe slicing wrapper (returns a 1-based copy)
+'               : Safe-size clamping signal can be observed via wasClamped
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
-Public Function SliceArraySafeFull(ByVal arr As Variant) As Variant
-    SliceArraySafeFull = SliceArraySafe(arr:=arr)
+Public Function SliceArraySafeFull(ByVal arr As Variant, _
+                                   Optional ByRef wasClamped As Boolean = False) As Variant
+
+    wasClamped = False
+    SliceArraySafeFull = SliceArraySafe(arr:=arr, wasClamped:=wasClamped)
+
 End Function
 
 ' ----------------------------------------------------------------------------------------------
 ' [F] AppendArrayVertical
 '
 ' 功能说明      : 垂直拼接两个数组（一维数组被视为单列），返回新的二维数组，自动进行索引规范化和大小检查
+'               : - 若两者均无效：返回 EMPTY_VALUE，并返回错误信息
+'               : - 若单边无效：返回另一边数组的 1-based 规范化结果（降级成功），并通过 wasDowngraded 告知调用方
+'               : - 若输出行数过大触发安全尺寸限制，可能发生行截断，并通过 wasDowngraded=True 告知调用方
 ' 参数          : baseArray - 基础数组（位于上方）
 '               : appendArray - 要追加的数组（位于下方）
-'               : errMsg - 可选，返回错误信息
-' 返回          : Variant - 垂直拼接后的二维数组，列数取两者列数（一维为1列）
-' Purpose       : Vertically concatenates two arrays (1D treated as single column), returns new 2D array with auto-normalization and size checking
+'               : errMsg - 可选，返回错误信息（仅在失败时返回）
+'               : wasDowngraded - 可选 ByRef 输出：True=发生降级（单边无效）；False=未降级
+' 返回          : Variant - 垂直拼接后的二维数组；降级时返回另一边数组的 1-based 版本；失败返回 EMPTY_VALUE
+' Purpose       : Vertically concatenates two arrays (1D treated as single column), returns new 2D array with
+'               : auto-normalization and size checking
+'               : If one side is invalid, returns normalized other side and sets wasDowngraded=True
+'               : Row clamping (if applied) sets wasDowngraded=True
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function AppendArrayVertical(ByRef baseArray As Variant, _
                                    ByRef appendArray As Variant, _
-                                   Optional ByRef errMsg As String) As Variant
+                                   Optional ByRef errMsg As String, _
+                                   Optional ByRef wasDowngraded As Boolean = False) As Variant
     errMsg = vbNullString
+    wasDowngraded = False
 
     Dim bInfo As ArrayInfo, aInfo As ArrayInfo
+    Dim bErr As String, aErr As String
     Dim bOk As Boolean, aOk As Boolean
 
-    bOk = GetArrayInfo(baseArray, bInfo, errMsg)
-    aOk = GetArrayInfo(appendArray, aInfo, errMsg)
+    bOk = GetArrayInfo(baseArray, bInfo, bErr)
+    aOk = GetArrayInfo(appendArray, aInfo, aErr)
 
     ' If either invalid => return normalized other (pass-through if other invalid too)
-    If Not bOk Then
-        AppendArrayVertical = NormalizeTo1Based(appendArray, False, errMsg)
+    If Not bOk And Not aOk Then
+        errMsg = "Both arrays invalid. base=" & bErr & "; append=" & aErr
+        AppendArrayVertical = EMPTY_VALUE
         Exit Function
     End If
+
+    If Not bOk Then
+        wasDowngraded = True
+        AppendArrayVertical = NormalizeTo1Based(appendArray, False)
+        Exit Function
+    End If
+
     If Not aOk Then
-        AppendArrayVertical = NormalizeTo1Based(baseArray, False, errMsg)
+        wasDowngraded = True
+        AppendArrayVertical = NormalizeTo1Based(baseArray, False)
         Exit Function
     End If
 
@@ -691,13 +801,13 @@ Public Function AppendArrayVertical(ByRef baseArray As Variant, _
 
     If bInfo.Count1 <= 0 Or aInfo.Count1 <= 0 Or bCols <= 0 Or aCols <= 0 Then
         errMsg = "Allocated array with data required."
-        AppendArrayVertical = Empty
+        AppendArrayVertical = EMPTY_VALUE
         Exit Function
     End If
 
     If bCols <> aCols Then
         errMsg = "Column count mismatch (Base:" & bCols & " vs App:" & aCols & ")."
-        AppendArrayVertical = Empty
+        AppendArrayVertical = EMPTY_VALUE
         Exit Function
     End If
 
@@ -709,10 +819,13 @@ Public Function AppendArrayVertical(ByRef baseArray As Variant, _
     safeSize = CalculateSafeArraySize(outRows, outCols)
     If safeSize(2) < outCols Then
         errMsg = "Unsafe output size."
-        AppendArrayVertical = Empty
+        AppendArrayVertical = EMPTY_VALUE
         Exit Function
     End If
-    If safeSize(1) < outRows Then outRows = safeSize(1)
+    If safeSize(1) < outRows Then
+        outRows = safeSize(1)
+        wasDowngraded = True  ' output was clamped (rows truncated)
+    End If
 
     Dim result() As Variant
     ReDim result(1 To outRows, 1 To outCols)
@@ -743,6 +856,7 @@ Public Function AppendArrayVertical(ByRef baseArray As Variant, _
     ' Copy append after base
     Dim remaining As Long
     remaining = outRows - baseRowsToCopy
+
     If remaining > 0 Then
         Dim appRowsToCopy As Long
         appRowsToCopy = aInfo.Count1
@@ -777,7 +891,9 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 ' [F] ToSafeLong
 '
-' 功能说明      : 将各种类型的输入值安全地转换为Long整数，支持范围检查和默认值
+' 功能说明      : 将各种类型的输入值安全地转换为 Long 整数，支持范围检查和默认值
+'               : - 仅接受可安全表示为整数的输入（例如 2.0 可，2.5 不可）
+'               : - 对非整数数值将返回 defaultValue 并给出 errMsg（避免银行家舍入导致的静默错误）
 ' 参数          : value - 要转换的输入值
 '               : defaultValue - 可选，转换失败时返回的默认值，默认为0
 '               : minVal - 可选，允许的最小值，默认为Long类型最小值(-2147483648)
@@ -785,8 +901,9 @@ End Function
 '               : errMsg - 可选，返回错误信息
 ' 返回          : Long - 转换后的Long整数值，失败则返回defaultValue
 ' Purpose       : Safely converts various input types to Long integer with range checking and default value
+'               : Rejects non-integer numeric inputs to avoid silent banker's rounding
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function ToSafeLong(ByVal value As Variant, _
                            Optional ByVal defaultValue As Long = 0, _
@@ -815,7 +932,8 @@ Public Function ToSafeLong(ByVal value As Variant, _
             If CBool(value) Then d = 1# Else d = 0#
 
         Case vbDate
-            d = CDbl(CDate(value))
+            errMsg = "Date type not supported for ToSafeLong."
+            Exit Function
 
         Case vbString
             If Not IsNumeric(value) Then
@@ -832,19 +950,21 @@ Public Function ToSafeLong(ByVal value As Variant, _
             d = CDbl(value)
     End Select
 
+    ' 先做范围检查（Double）
     If d < CDbl(minVal) Or d > CDbl(maxVal) Then
         errMsg = "Out of range."
         Exit Function
     End If
 
-    Dim l As Long
-    l = CLng(d) ' may overflow on banker's rounding edge
-    If l < minVal Or l > maxVal Then
-        errMsg = "Out of range after rounding."
+    ' 拒绝非整数输入，避免 CLng 的银行家舍入导致静默错误（例如 2.5 -> 2）
+    If d <> Fix(d) Then
+        errMsg = "Non-integer value not supported."
         Exit Function
     End If
 
-    ToSafeLong = l
+    ' d is verified to be an integer within Long range; CLng is safe for finite integer Doubles.
+    ' Note: vbDecimal/vbCurrency with extreme precision may lose accuracy at CDbl conversion above.
+    ToSafeLong = CLng(d)
     Exit Function
 
 Fail:
@@ -864,7 +984,7 @@ End Function
 ' 返回          : Double - 转换后的Double浮点数值，失败则返回defaultValue
 ' Purpose       : Safely converts various input types to Double with range checking and default value
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function ToSafeDouble(ByVal value As Variant, _
                              Optional ByVal defaultValue As Double = 0#, _
@@ -935,7 +1055,7 @@ End Function
 ' 返回          : String - 转换后的字符串，失败则返回defaultValue
 ' Purpose       : Safely converts various input types to String with trimming and length limiting options
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function ToSafeString(ByVal value As Variant, _
                              Optional ByVal defaultValue As String = vbNullString, _
@@ -976,7 +1096,7 @@ End Function
 ' 返回          : Boolean - 是否为数值，True表示是数值，False表示非数值或Empty/Null
 ' Purpose       : Safely checks if input value is numeric, automatically handles Empty and Null
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsNumericSafe(ByVal value As Variant) As Boolean
     If IsEmpty(value) Or IsNull(value) Then Exit Function
@@ -993,7 +1113,7 @@ End Function
 ' 返回          : Boolean - 是否为有效日期，True表示是日期，False表示非日期或Empty/Null
 ' Purpose       : Safely checks if input value is a valid date, automatically handles Empty and Null
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function IsDateSafe(ByVal value As Variant) As Boolean
     If IsEmpty(value) Or IsNull(value) Then Exit Function
@@ -1005,17 +1125,43 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 ' [F] SanitizeString
 '
-' 功能说明      : 清理字符串中的无效字符，使用默认的清理函数
-' 参数          : text - 要清理的原始文本
-'               : replacement - 可选，用于替换无效字符的字符串，默认为空字符串
-' 返回          : String - 清理后的安全字符串
-' Purpose       : Sanitizes a string by removing invalid characters, using the default sanitization function
+' 功能说明      : 清理字符串中的控制字符（0x00-0x1F, 0x7F）
+'               : 优先使用 VBScript.RegExp 进行批量替换
+'               : 若 RegExp 不可用，则回退至内置的 Fallback 实现逐字符清理
+' 参数          : text - 要清理的字符串
+'               : replacement - 可选，替换控制字符的字符串（默认空字符串）
+' 返回          : String - 清理后的字符串
+' Purpose       : Removes control characters using RegExp when available; falls back to internal implementation otherwise
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function SanitizeString(ByVal text As String, _
                                Optional ByVal replacement As String = vbNullString) As String
-    SanitizeString = SanitizeStringFallback(text, replacement)
+    Dim re As Object
+    Set re = TryCreateRegExp()
+    If re Is Nothing Then
+        SanitizeString = SanitizeStringFallback(text, replacement)
+        Exit Function
+    End If
+
+    ' 控制字符：0x00-0x1F 和 0x7F
+    re.Pattern = "[\x00-\x1F\x7F]"
+    re.Global = True
+    SanitizeString = re.Replace(text, replacement)
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] TryCreateRegExp
+'
+' 功能说明      : 尝试创建VBScript正则表达式对象，失败时返回Nothing
+' 参数          : None - 无参数
+' 返回          : Object - 成功时返回RegExp对象，失败时返回Nothing
+' Purpose       : Attempts to create a VBScript RegExp object, returns Nothing on failure
+' ----------------------------------------------------------------------------------------------
+Private Function TryCreateRegExp() As Object
+    On Error Resume Next
+    Set TryCreateRegExp = CreateObject("VBScript.RegExp")
+    On Error GoTo 0
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -1025,6 +1171,7 @@ End Function
 ' 参数          : text - 要清理的原始文本
 '               : replacement - 用于替换无效字符的字符串
 ' 返回          : String - 清理后的安全字符串，所有控制字符被替换
+' Purpose       : Loop-based sanitizer fallback
 ' ----------------------------------------------------------------------------------------------
 Private Function SanitizeStringFallback(ByVal text As String, _
                                         ByVal replacement As String) As String
@@ -1091,6 +1238,7 @@ End Function
 ' 参数          : raw - 要解析的原始输入值
 '               : outVal - 输出参数，返回解析后的布尔值
 ' 返回          : Boolean - 解析是否成功，True表示成功解析为布尔值
+' Purpose       : Helper: parses common boolean representations
 ' ----------------------------------------------------------------------------------------------
 Private Function ParseBoolean(ByVal raw As Variant, _
                               ByRef outVal As Boolean) As Boolean
@@ -1144,23 +1292,49 @@ Private Const DEFAULT_MAX_ABS As Double = 1.79769313486231E+308 ' Double.Max (ap
 ' 返回          : Variant - 乘法结果，若结果无效或超出范围则返回Empty
 ' Purpose       : Safely multiplies two double values, checking if result is finite and within maximum absolute value
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function SafeMultiply(ByVal a As Double, ByVal b As Double, _
                              Optional ByVal maxAbs As Double = DEFAULT_MAX_ABS) As Variant
-    Dim r As Double
-    r = a * b
+    On Error GoTo Fail
 
-    If Not IsFiniteDouble(r) Then
-        SafeMultiply = Empty
+    ' 输入本身不有限，直接失败
+    If Not IsFiniteDouble(a) Or Not IsFiniteDouble(b) Then
+        SafeMultiply = EMPTY_VALUE
         Exit Function
     End If
 
-    If Abs(r) > maxAbs Then
-        SafeMultiply = Empty
+    ' 0 快路径
+    If a = 0# Or b = 0# Then
+        SafeMultiply = 0#
+        Exit Function
+    End If
+
+    ' 预检测溢出：|a*b| > maxAbs
+    Dim aa As Double, bb As Double
+    aa = Abs(a): bb = Abs(b)
+    If aa > 0# And bb > 0# Then
+        If aa > (maxAbs / bb) Then
+            SafeMultiply = EMPTY_VALUE
+            Exit Function
+        End If
+    End If
+
+    Dim r As Double
+    r = a * b
+
+    ' 事后兜底
+    If Not IsFiniteDouble(r) Then
+        SafeMultiply = EMPTY_VALUE
+    ElseIf Abs(r) > maxAbs Then
+        SafeMultiply = EMPTY_VALUE
     Else
         SafeMultiply = r
     End If
+    Exit Function
+
+Fail:
+    SafeMultiply = EMPTY_VALUE
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -1173,23 +1347,31 @@ End Function
 ' 返回          : Variant - 加法结果，若结果无效或超出范围则返回Empty
 ' Purpose       : Safely adds two double values, checking if result is finite and within maximum absolute value
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function SafeAdd(ByVal a As Double, ByVal b As Double, _
                         Optional ByVal maxAbs As Double = DEFAULT_MAX_ABS) As Variant
+    On Error GoTo Fail
+
+    If Not IsFiniteDouble(a) Or Not IsFiniteDouble(b) Then
+        SafeAdd = EMPTY_VALUE
+        Exit Function
+    End If
+
     Dim r As Double
     r = a + b
 
     If Not IsFiniteDouble(r) Then
-        SafeAdd = Empty
-        Exit Function
-    End If
-
-    If Abs(r) > maxAbs Then
-        SafeAdd = Empty
+        SafeAdd = EMPTY_VALUE
+    ElseIf Abs(r) > maxAbs Then
+        SafeAdd = EMPTY_VALUE
     Else
         SafeAdd = r
     End If
+    Exit Function
+
+Fail:
+    SafeAdd = EMPTY_VALUE
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -1198,11 +1380,12 @@ End Function
 ' 功能说明      : 判断双精度数是否为有限数（非无穷大且非NaN）
 ' 参数          : x - 要检查的双精度数
 ' 返回          : Boolean - 是否为有限数，True表示是有限数
+' Purpose       : Helper: finite (not NaN/Inf) check
 ' ----------------------------------------------------------------------------------------------
 Private Function IsFiniteDouble(ByVal x As Double) As Boolean
-    ' Only finite values satisfy (x - x = 0).
-    ' Inf - Inf = NaN, NaN - NaN = NaN, and NaN <> NaN.
     Dim diff As Double
     diff = x - x
-    IsFiniteDouble = (diff = diff) ' False only for NaN
+    ' Returns False for NaN and +/-Inf:
+    ' for finite x, (x - x) = 0; for NaN/Inf, (x - x) yields NaN, and NaN <> NaN.
+    IsFiniteDouble = (diff = diff)
 End Function
