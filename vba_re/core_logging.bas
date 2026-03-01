@@ -11,25 +11,34 @@ Attribute VB_Name = "core_logging"
 ' STATUS            : Frozen
 ' ==============================================================================================
 ' VERSION HISTORY   :
+' v1.0.0
+'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+
 ' v2.0.0
 '   - Refactor: split project into layered architecture (Core / Platform / Business).
 '   - Freeze: standardized log line formatting + context serialization + timer capability.
-'
-' v1.0.0
-'   - Initial draft based on legacy implementation, iteratively refined during early refactor.
+
+' v2.1.0
+'   - Fix (Contract): StartTimer/ElapsedTime/ClearTimers contracts corrected to
+'                     Core / Capability (stateful); Side Effects annotated accurately.
+'   - Fix (Docs): LogInfo/LogWarn/LogError/LogDebug given independent comment blocks;
+'                 LogDebug condition and empty-return behavior explicitly documented.
+'   - Fix (Docs): FormatDateTimeWithMS annotated as pseudo-milliseconds (not hi-res clock).
+'   - Fix (Reliability): BuildContextString On Error pattern unified to capture e before GoTo 0.
+'   - Fix (Build): #Const DEBUG_MODE comment added; override via Project Properties documented.
+'   - Removed: SafeWriteLog stub removed (was declared in TOC but never implemented).
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
 ' SECTION 01: LOG CONTRACTS & FORMAT (QUERY)
-'   [f] FormatDateTimeWithMS    - Formats datetime with pseudo-milliseconds slot
 '   [F] BuildContextString      - Serializes context (primitive/dictionary/etc.) to string
 '   [f] EscapeLogField          - Escapes separators to keep log lines parseable
+'   [f] FormatDateTimeWithMS    - Formats datetime with pseudo-milliseconds slot
 '   [F] FormatLogLine           - Formats standardized log line (no IO)
 '   [F] LogInfo                 - Convenience: INFO line formatting
 '   [F] LogWarn                 - Convenience: WARN line formatting
 '   [F] LogError                - Convenience: ERROR line formatting
 '   [F] LogDebug                - Convenience: DEBUG line formatting (#If DEBUG_MODE)
-'   [f] SafeWriteLog            - Compatibility hook (kept as formatting-only / no sink)
 '
 ' SECTION 02: PERF TIMERS (CAPABILITY)
 '   [S] StartTimer              - Starts/replaces a named timer
@@ -43,6 +52,7 @@ Attribute VB_Name = "core_logging"
 '       [F]=Public Function, [f]=Private Function
 ' ==============================================================================================
 Option Explicit
+#Const DEBUG_MODE = False       ' Note: Override via Project Properties > Compile > Conditional Compilation Arguments: DEBUG_MODE=-1
 
 ' ============================================================
 ' SECTION 01: LOG CONTRACTS & FORMAT (QUERY)
@@ -54,9 +64,9 @@ Option Explicit
 ' 功能说明      : 将 context 序列化为可读字符串（Dictionary: k=v;...），用于日志行 Context 字段
 ' 参数          : context - 任意类型上下文（常见：Dictionary/String/Number/Boolean/Empty/Null）
 ' 返回          : String - 序列化后的上下文字符串（无则返回空字符串）
-' Purpose       : Serializes context into a compact string for log output.
-' Contract      : Core / Query-only.
-' Side Effects  : None (Query-only).
+' Purpose       : Serializes context into a compact string for log output
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function BuildContextString(ByVal context As Variant) As String
 
@@ -89,47 +99,71 @@ Public Function BuildContextString(ByVal context As Variant) As String
         End If
 
         ' ---- Other objects: best-effort string conversion
+        Dim e as Long
         On Error Resume Next
         BuildContextString = CStr(context)
-        If Err.Number <> 0 Then
-            Err.Clear
+        e = Err.Number
+        On Error GoTo 0
+        If e <> 0 Then
             BuildContextString = "[" & TypeName(context) & "]"
         End If
-        On Error GoTo 0
+        
         Exit Function
     End If
 
     ' ---- Primitive types
+    Dim ep as Long
     On Error Resume Next
     BuildContextString = EscapeLogField(CStr(context))
-    If Err.Number <> 0 Then
-        Err.Clear
-        BuildContextString = vbNullString
-    End If
+    ep = Err.Number
     On Error GoTo 0
+    If ep <> 0 Then BuildContextString = vbNullString
 
 End Function
 
 ' ----------------------------------------------------------------------------------------------
 ' [f] EscapeLogField
 '
-' 功能说明      : 转义日志字段中的分隔符与反斜杠，保证输出可解析
-' 参数          : s - 原始字段内容
+' 功能说明      : 转义日志字段中的分隔符，确保 FormatLogLine 输出满足“一条日志一行”的契约。
+'               : 转义字符包括：\, |, ;, = 以及换行符 CR/LF。
+' 参数          : value - 待转义的字段内容
 ' 返回          : String - 转义后的字段内容
+' Purpose       : Escapes log fields to keep FormatLogLine output single-line and parseable
 ' ----------------------------------------------------------------------------------------------
-Private Function EscapeLogField(ByVal s As String) As String
-    If Len(s) = 0 Then
-        EscapeLogField = vbNullString
-        Exit Function
-    End If
+Private Function EscapeLogField(ByVal value As String) As String
+    Dim s As String
+    s = value
 
-    ' Escape order matters: escape "\" first.
+    ' escape separators
     s = Replace$(s, "\", "\\")
     s = Replace$(s, "|", "\|")
     s = Replace$(s, ";", "\;")
     s = Replace$(s, "=", "\=")
 
+    ' escape newlines to preserve single-line log contract
+    s = Replace$(s, vbCr, "\r")
+    s = Replace$(s, vbLf, "\n")
+
     EscapeLogField = s
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] FormatDateTimeWithMS
+'
+' 功能说明      : 将日期时间格式化为包含毫秒的字符串（简洁时间格式：yyyy-mm-dd hh:nn:ss.000）
+'               : 说明：毫秒位使用 VBA.Timer 偏移量计算，为伪毫秒（非系统高精度时钟）
+' 参数          : dtValue - 要格式化的日期时间值
+' 返回          : String - 包含毫秒的格式化日期时间字符串
+' Purpose       : Formats datetime with pseudo-milliseconds slot (fixed format)
+' ----------------------------------------------------------------------------------------------
+Private Function FormatDateTimeWithMS(ByVal dtValue As Date) As String
+    Dim ms As Long
+    ms = CLng((dtValue - Int(dtValue)) * 86400000) Mod 1000
+    If ms < 0 Then ms = ms + 1000
+    
+    FormatDateTimeWithMS = _
+        Format$(dtValue, "yyyy-mm-dd hh:nn:ss") & "." & _
+        Format$(ms, "000")
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -143,9 +177,9 @@ End Function
 '               : message - 日志正文
 '               : context - 可选上下文（Dictionary 或简单类型）
 ' 返回          : String - 标准化日志行
-' Purpose       : Format standardized log line (no IO).
-' Contract      : Core / Query-only.
-' Side Effects  : None (Query-only).
+' Purpose       : Format standardized log line (no IO)
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function FormatLogLine(ByVal level As String, _
                               ByVal layer As String, _
@@ -155,7 +189,7 @@ Public Function FormatLogLine(ByVal level As String, _
                               Optional ByVal context As Variant) As String
 
     Dim ts As String
-    ts = FormatDateTimeWithMS(Now, "yyyy-mm-dd hh:nn:ss.ms")
+    ts = FormatDateTimeWithMS(Now)
 
     Dim ctx As String
     ctx = BuildContextString(context)
@@ -177,79 +211,97 @@ Public Function FormatLogLine(ByVal level As String, _
 End Function
 
 ' ----------------------------------------------------------------------------------------------
-' [f] FormatDateTimeWithMS
+' [F] LogInfo
 '
-' 功能说明      : 将日期时间格式化为包含毫秒的字符串（简洁时间格式：yyyy-mm-dd hh:nn:ss.000）
-' 参数          : dtValue - 要格式化的日期时间值
-' 返回          : String - 包含毫秒的格式化日期时间字符串
-' ----------------------------------------------------------------------------------------------
-Private Function FormatDateTimeWithMS(ByVal dtValue As Date) As String
-    Dim ms As Long
-    ms = CLng((dtValue - Int(dtValue)) * 86400000) Mod 1000
-    If ms < 0 Then ms = ms + 1000
-    
-    FormatDateTimeWithMS = _
-        Format$(dtValue, "yyyy-mm-dd hh:nn:ss") & "." & _
-        Format$(ms, "000")
-End Function
-
-' ----------------------------------------------------------------------------------------------
-' [F] LogInfo, LogWarn, LogError, LogDebug
-'
-' 功能说明      : 语义封装的日志记录函数，分别用于记录信息、警告、错误和调试级别的日志
-' 参数          : layer - 所属层（如UI、DATA等）
+' 功能说明      : 生成 INFO 级别的格式化日志字符串（不写入任何 sink）。
+' 参数          : layer - 逻辑层级（如 "core"/"plat"/"biz" 或你项目约定的层）
 '               : moduleName - 模块名称
 '               : procName - 过程/函数名称
-'               : message - 日志消息
-'               : context - 可选，附加上下文信息（字典或基本类型）
-' 返回          : String - 对应级别的格式化日志行（Debug模式开启时才记录调试日志）
-' Purpose       : Semantically wrapped logging functions for INFO, WARN, ERROR, and DEBUG levels
+'               : message - 日志内容
+'               : context - 可选，附加上下文（允许 Variant，用于传递更多信息）
+' 返回          : String - 格式化后的日志行
+' Purpose       : Generates a formatted INFO-level log line (formatting only; no sink)
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
-Public Function LogInfo( _
-        ByVal layer As String, _
-        ByVal moduleName As String, _
-        ByVal procName As String, _
-        ByVal message As String, _
-        Optional ByVal context As Variant) As String
-    
+Public Function LogInfo(ByVal layer As String, _
+                        ByVal moduleName As String, _
+                        ByVal procName As String, _
+                        ByVal message As String, _
+                        Optional ByVal context As Variant) As String
     LogInfo = FormatLogLine("INFO", layer, moduleName, procName, message, context)
 End Function
 
-Public Function LogWarn( _
-        ByVal layer As String, _
-        ByVal moduleName As String, _
-        ByVal procName As String, _
-        ByVal message As String, _
-        Optional ByVal context As Variant) As String
-    
+' ----------------------------------------------------------------------------------------------
+' [F] LogWarn
+'
+' 功能说明      : 生成 WARN 级别的格式化日志字符串（不写入任何 sink）。
+' 参数          : layer - 逻辑层级
+'               : moduleName - 模块名称
+'               : procName - 过程/函数名称
+'               : message - 日志内容
+'               : context - 可选，附加上下文（Variant）
+' 返回          : String - 格式化后的日志行
+' Purpose       : Generates a formatted WARN-level log line (formatting only; no sink)
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
+' ----------------------------------------------------------------------------------------------
+Public Function LogWarn(ByVal layer As String, _
+                        ByVal moduleName As String, _
+                        ByVal procName As String, _
+                        ByVal message As String, _
+                        Optional ByVal context As Variant) As String
     LogWarn = FormatLogLine("WARN", layer, moduleName, procName, message, context)
 End Function
 
-Public Function LogError( _
-        ByVal layer As String, _
-        ByVal moduleName As String, _
-        ByVal procName As String, _
-        ByVal message As String, _
-        Optional ByVal context As Variant) As String
-    
+' ----------------------------------------------------------------------------------------------
+' [F] LogError
+'
+' 功能说明      : 生成 ERROR 级别的格式化日志字符串（不写入任何 sink）。
+' 参数          : layer - 逻辑层级
+'               : moduleName - 模块名称
+'               : procName - 过程/函数名称
+'               : message - 日志内容
+'               : context - 可选，附加上下文（Variant）
+' 返回          : String - 格式化后的日志行
+' Purpose       : Generates a formatted ERROR-level log line (formatting only; no sink)
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
+' ----------------------------------------------------------------------------------------------
+Public Function LogError(ByVal layer As String, _
+                         ByVal moduleName As String, _
+                         ByVal procName As String, _
+                         ByVal message As String, _
+                         Optional ByVal context As Variant) As String
     LogError = FormatLogLine("ERROR", layer, moduleName, procName, message, context)
 End Function
 
-Public Function LogDebug( _
-        ByVal layer As String, _
-        ByVal moduleName As String, _
-        ByVal procName As String, _
-        ByVal message As String, _
-        Optional ByVal context As Variant) As String
-    
+' ----------------------------------------------------------------------------------------------
+' [F] LogDebug
+'
+' 功能说明      : 生成 DEBUG 级别的格式化日志字符串（不写入任何 sink）。
+'               : 仅在编译时定义了 DEBUG_MODE 时返回格式化日志行；否则始终返回空字符串
+' 参数          : layer - 逻辑层级
+'               : moduleName - 模块名称
+'               : procName - 过程/函数名称
+'               : message - 日志内容
+'               : context - 可选，附加上下文（Variant）
+' 返回          : String - DEBUG_MODE 下返回日志行；否则返回空字符串
+' Purpose       : Generates a formatted DEBUG-level log line (formatting only; no sink)
+'               : Returns empty string when DEBUG_MODE is not defined
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
+' ----------------------------------------------------------------------------------------------
+Public Function LogDebug(ByVal layer As String, _
+                         ByVal moduleName As String, _
+                         ByVal procName As String, _
+                         ByVal message As String, _
+                         Optional ByVal context As Variant) As String
 #If DEBUG_MODE Then
     LogDebug = FormatLogLine("DEBUG", layer, moduleName, procName, message, context)
 #Else
-    LogDebug = ""
+    LogDebug = vbNullString
 #End If
-    
 End Function
 
 ' ============================================================
@@ -265,8 +317,8 @@ Private pTimers As Object   ' Scripting.Dictionary (late binding)
 ' 参数          : timerName - 计时器名称，用于唯一标识
 ' 返回          : 无 - Sub过程无返回值
 ' Purpose       : Starts a timer with the specified name, recording current time for subsequent performance measurement
-' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Contract      : Core / Capability (stateful)
+' Side Effects  : Modifies internal timer state (pTimers dictionary)
 ' ----------------------------------------------------------------------------------------------
 Public Sub StartTimer(ByVal timerName As String)
     
@@ -289,8 +341,8 @@ End Sub
 '               : defaultValue - 可选，计时器不存在时返回的默认值，默认为0
 ' 返回          : Double - 经过的秒数，计时器不存在则返回默认值
 ' Purpose       : Gets the elapsed time in seconds for a specified timer, supports auto-reset and midnight crossing handling
-' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Contract      : Core / Capability (stateful)
+' Side Effects  : If reset=True, removes timerName from pTimers; otherwise none
 ' ----------------------------------------------------------------------------------------------
 Public Function ElapsedTime( _
         ByVal timerName As String, _
@@ -332,7 +384,7 @@ End Function
 ' 返回          : String - 格式化后的时间字符串，如 "1.234s"
 ' Purpose       : Formats seconds to a readable time string (with 3 decimal places and "s" unit)
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function FormatElapsedTime(ByVal seconds As Double) As String
     
@@ -350,7 +402,7 @@ End Function
 ' 返回          : Boolean - 计时器是否存在，True表示存在
 ' Purpose       : Checks if a timer with the specified name exists
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function TimerExists(ByVal timerName As String) As Boolean
     
@@ -366,11 +418,12 @@ End Function
 ' [F] GetAllTimers
 '
 ' 功能说明      : 获取所有已启动计时器的名称数组
+'               : 说明：空时返回 `Array()`，调用方应先检查 `UBound(result) < LBound(result)`
 ' 参数          : None - 无参数
 ' 返回          : Variant - 包含所有计时器名称的数组，若无计时器则返回空数组
 ' Purpose       : Gets an array of all started timer names
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetAllTimers() As Variant
     
@@ -390,8 +443,8 @@ End Function
 ' 参数          : None - 无参数
 ' 返回          : 无 - Sub过程无返回值
 ' Purpose       : Clears all timers and releases the timer dictionary resource
-' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Contract      : Core / Capability (stateful)
+' Side Effects  : Clears internal timer state (pTimers dictionary)
 ' ----------------------------------------------------------------------------------------------
 Public Sub ClearTimers()
     
