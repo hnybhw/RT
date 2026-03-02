@@ -49,6 +49,13 @@ Attribute VB_Name = "core_utils"
 '                       not supported to prevent unintended date-serial coercion.
 '   - Fix (SafeMath): SafeMultiply/SafeAdd add error guards and stronger finite/overflow handling;
 '                     IsFiniteDouble comment corrected (returns False for NaN and +/-Inf).
+
+' v2.1.1
+'   - Add (Conversion): Introduced ToSafeBoolean as public safe conversion API;
+'                       unifies Boolean parsing semantics with existing ToSafeLong/
+'                       ToSafeDouble/ToSafeString family (query-only, fallback on failure).
+'   - Add (Parsing): Added private helper ParseBoolean to centralize Boolean
+'                    representation handling (Boolean / numeric / string forms).
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
@@ -73,12 +80,13 @@ Attribute VB_Name = "core_utils"
 '   [F] ToSafeLong              - Safe Long conversion with range check
 '   [F] ToSafeDouble            - Safe Double conversion with range check
 '   [F] ToSafeString            - Safe String conversion with trim/length options
+'   [F] ToSafeBoolean           - Safely converts variant to Boolean (True/False/Yes/No/Y/N/1/0)
+'   [f] ParseBoolean            - Helper: parses common boolean representations (Boolean/numeric/string)
 '   [F] IsNumericSafe           - Safe IsNumeric check
 '   [F] IsDateSafe              - Safe IsDate check
 '   [F] SanitizeString          - Removes control chars using RegExp (fallback supported)
 '   [f] TryCreateRegExp         - Attempts to create a VBScript RegExp object, returns Nothing on failure
 '   [f] SanitizeStringFallback  - Loop-based sanitizer fallback
-'   [f] ParseBoolean            - Helper: parses common boolean representations
 '
 ' SECTION 04: SAFE MATH
 '   [F] SafeMultiply            - Safe multiply (finite check + abs clamp)
@@ -370,7 +378,7 @@ End Function
 ' 返回          : Long() - 包含两个元素的一维数组，result(1)为安全行数，result(2)为安全列数
 ' Purpose       : Calculates safe array dimensions ensuring total elements don't exceed specified maximum
 ' Contract      : Core / Query-only
-' Side Effects  : None (Query-only).
+' Side Effects  : None (Query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function CalculateSafeArraySize(ByVal requestedRows As Long, _
                                        ByVal requestedCols As Long, _
@@ -1100,6 +1108,85 @@ Fail:
 End Function
 
 ' ----------------------------------------------------------------------------------------------
+' [F] ToSafeBoolean
+'
+' 功能说明      : 将各种类型的输入值安全地转换为 Boolean，支持数字、字符串和布尔类型
+'               : - 支持: True/False, Yes/No, Y/N, 1/0（大小写不敏感，自动 Trim）
+'               : - 空值 (Empty/Null/"") => 返回 defaultValue
+' 参数          : value - 输入值
+'               : defaultValue - 可选，转换失败或空值时返回的默认值，默认为 False
+'               : errMsg - 可选，返回错误信息（成功或空值则为空）
+' 返回          : Boolean - 转换结果（永不抛异常）
+' Purpose       : Safely converts a Variant value to Boolean with fallback on failure
+' Contract      : Core / Query-only
+' Side Effects  : None (Query-only)
+' ----------------------------------------------------------------------------------------------
+Public Function ToSafeBoolean(ByVal value As Variant, _
+                              Optional ByVal defaultValue As Boolean = False, _
+                              Optional ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
+    ToSafeBoolean = defaultValue
+
+    If IsEmpty(value) Or IsNull(value) Then Exit Function
+
+    Dim outVal As Boolean
+    If ParseBoolean(value, outVal) Then
+        ToSafeBoolean = outVal
+    Else
+        errMsg = "Not a recognized boolean value."
+    End If
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] ParseBoolean
+'
+' 功能说明      : 将各种类型的输入值解析为布尔值，支持数字、字符串和布尔类型
+' 参数          : raw - 要解析的原始输入值
+'               : outVal - 输出参数，返回解析后的布尔值
+' 返回          : Boolean - 解析是否成功，True 表示成功解析为布尔值
+' Purpose       : Helper: parses common boolean representations (Boolean/numeric/string)
+' ----------------------------------------------------------------------------------------------
+Private Function ParseBoolean(ByVal raw As Variant, _
+                              ByRef outVal As Boolean) As Boolean
+    Select Case VarType(raw)
+
+        Case vbBoolean
+            outVal = CBool(raw)
+            ParseBoolean = True
+
+        Case vbByte, vbInteger, vbLong, vbSingle, vbDouble, vbCurrency, vbDecimal
+            outVal = (CDbl(raw) <> 0#)
+            ParseBoolean = True
+
+        Case vbString
+            Dim s As String
+            s = LCase$(Trim$(CStr(raw)))
+            If Len(s) = 0 Then Exit Function
+
+            Select Case s
+                Case "true", "yes", "y", "1"
+                    outVal = True
+                    ParseBoolean = True
+                Case "false", "no", "n", "0"
+                    outVal = False
+                    ParseBoolean = True
+            End Select
+
+        Case Else
+            ' Fallback for rare Variant-wrapped numerics not caught by typed cases above.
+            ' vbDate is explicitly excluded: IsNumeric(#date#) = True in VBA (date is
+            ' stored as Double), so without this guard a date would silently become True/False.
+            If VarType(raw) <> vbDate Then
+                If IsNumeric(raw) Then
+                    outVal = (CDbl(raw) <> 0#)
+                    ParseBoolean = True
+                End If
+            End If
+
+    End Select
+End Function
+
+' ----------------------------------------------------------------------------------------------
 ' [F] IsNumericSafe
 '
 ' 功能说明      : 安全地检查输入值是否为数值类型，自动处理Empty和Null值
@@ -1240,51 +1327,6 @@ Private Function SanitizeStringFallback(ByVal text As String, _
     Next i
 
     SanitizeStringFallback = Join(parts, vbNullString)
-End Function
-
-' ----------------------------------------------------------------------------------------------
-' [f] ParseBoolean
-'
-' 功能说明      : 将各种类型的输入值解析为布尔值，支持数字、字符串和布尔类型
-' 参数          : raw - 要解析的原始输入值
-'               : outVal - 输出参数，返回解析后的布尔值
-' 返回          : Boolean - 解析是否成功，True表示成功解析为布尔值
-' Purpose       : Helper: parses common boolean representations
-' ----------------------------------------------------------------------------------------------
-Private Function ParseBoolean(ByVal raw As Variant, _
-                              ByRef outVal As Boolean) As Boolean
-    Dim vt As VbVarType
-    vt = VarType(raw)
-
-    Select Case vt
-        Case vbBoolean
-            outVal = CBool(raw)
-            ParseBoolean = True
-
-        Case vbByte, vbInteger, vbLong, vbSingle, vbDouble, vbCurrency, vbDecimal
-            outVal = (CDbl(raw) <> 0#)
-            ParseBoolean = True
-
-        Case vbString
-            Dim s As String
-            s = Trim$(CStr(raw))
-            If Len(s) = 0 Then Exit Function
-
-            s = LCase$(s)
-            If s = "true" Or s = "yes" Or s = "y" Or s = "1" Then
-                outVal = True
-                ParseBoolean = True
-            ElseIf s = "false" Or s = "no" Or s = "n" Or s = "0" Then
-                outVal = False
-                ParseBoolean = True
-            End If
-
-        Case Else
-            If IsNumeric(raw) Then
-                outVal = (CDbl(raw) <> 0#)
-                ParseBoolean = True
-            End If
-    End Select
 End Function
 
 ' ==============================================================================================
