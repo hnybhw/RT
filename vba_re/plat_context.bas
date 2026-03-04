@@ -44,47 +44,56 @@ Attribute VB_Name = "plat_context"
 '   - Fix (Compile): Removed duplicate wsLog/WsLog property definition (VBA identifiers are case-insensitive); standardized on WsLog.
 '   - Refine (Encapsulation): Made InitProjectLogger Private to enforce single lifecycle control via InitContext and prevent external factory misuse.
 '   - Improve (Registry Validation): Added explicit row-level validation for missing SheetName/RangeName and switched registry read to Value2 for stable typing.
+
+' v2.1.2
+'   - Refine (Factory Semantics): Removed redundant gLogger assignment inside InitProjectLogger; state ownership consolidated to InitContext caller.
+'   - Clarify (Contract): Documented GetRangeValue caller-owned context responsibility; EnsureContextReady intentionally omitted as function depends only on caller-supplied ws.
+'   - Refine (Clarity): Replaced direct function return-slot read in GetRangeOrRaise with explicit local variable to eliminate return-slot-as-intermediate ambiguity.
+'   - Fix (Defensive Consistency): Added null guard to Config Property to match Logger Property pattern; both raise on Nothing after successful Init.
+'   - Refine (Encapsulation): Demoted RegisterRanges from Public to Private; legacy fallback retained internally but hidden from external callers to prevent misuse of deprecated API.
+'   - Note (Encoding): Bilingual comments (Chinese/English) retained for development readability; full migration to English pending before production release to resolve GBK/UTF-8 mismatch.
+'   - Fix (Config Default): Changed CFG_STR_LOG_LEVEL default from "MODULE" to "INFO" to eliminate undocumented cross-module sentinel coupling with plat_logger.LevelRank.
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
 ' SECTION 00: MODULE STATE
 '
 ' SECTION 01: INIT / RESET (LIFECYCLE)
-'   [S] InitContext                     - Initialize platform context, bind worksheets and load config
-'   [S] ResetContext                    - Reset context, release all resources
-'   [f] BindSheetOrRaise                - Bind worksheet or raise error
-'   [s] EnsureContextReady              - Ensure context is ready
+'   [S] InitContext                             - Initialize platform context, bind worksheets and load config
+'   [S] ResetContext                            - Reset context, release all resources
+'   [f] BindSheetOrRaise                        - Bind worksheet or raise error
+'   [s] EnsureContextReady                      - Ensure context is ready
 '
 ' SECTION 02: WORKSHEET GETTERS
-'   [P] ContextInited                   - Return context initialization status
-'   [P] Setup/Main/Log/Treaty/SubLoB    - Return Setup/Main/Log/Treaty/SubLoB worksheet object
-'   [P] GN/EL/RE/KPI                    - Return GN/EL/RE/KPI worksheet object
+'   [P] ContextInited                           - Return context initialization status
+'   [P] WsSetup/WsMain/WsLog/WsTreaty/WsSubLoB  - Return Setup/Main/Log/Treaty/SubLoB worksheet object
+'   [P] WsGN/WsEL/WsRE/WsKPI                    - Return GN/EL/RE/KPI worksheet object
 '
 ' SECTION 03: LOGGER ACCESS
-'   [P] Logger                          - Return logger object
-'   [F] GetLogger                       - Get logger object (function form)
-'   [f] InitProjectLogger               - Initialize project logger
+'   [P] Logger                                  - Return logger object
+'   [F] GetLogger                               - Get logger object (function form)
+'   [f] InitProjectLogger                       - Initialize project logger
 '
 ' SECTION 04: CONFIG REGISTRY
-'   [f] GetConfigDictionary             - Get configuration dictionary
-'   [F] GetConfigValue                  - Get configuration value
-'   [f] GetConfigValueDirect            - Direct config value access (internal)
-'   [P] Config                          - Return configuration dictionary object
+'   [f] GetConfigDictionary                     - Get configuration dictionary
+'   [F] GetConfigValue                          - Get configuration value
+'   [f] GetConfigValueDirect                    - Direct config value access (internal)
+'   [P] Config                                  - Return configuration dictionary object
 '
 ' SECTION 05: RANGE REGISTRY (CACHED OBJECT ACCESS)
-'   [f] ReadRangeFromSheet              - Read range value from worksheet
-'   [F] GetRange                        - Get range object (cached)
-'   [F] GetRangeOrRaise                 - Get range object or raise error
-'   [F] GetRangeValue                   - Get range value
-'   [S] ClearRangeCache                 - Clear range cache
+'   [f] ReadRangeFromSheet                      - Read range value from worksheet
+'   [F] GetRange                                - Get range object (cached)
+'   [F] GetRangeOrRaise                         - Get range object or raise error
+'   [F] GetRangeValue                           - Get range value
+'   [S] ClearRangeCache                         - Clear range cache
 '
 ' SECTION 06: RANGE REGISTRY WARMUP (PRIMARY + FALLBACK)
-'   [S] RegisterRangesFromSetup         - Register ranges from Setup worksheet
-'   [S] RegisterRanges                  - Register ranges (legacy method)
+'   [S] RegisterRangesFromSetup                 - Register ranges from Setup worksheet
+'   [s] RegisterRanges                          - Register ranges (legacy method)
 '
 ' SECTION 07: INTERNAL CONFIG REGISTRATION HELPERS
-'   [s] RegisterConfig                  - Register configuration item
-'   [f] ReadValueFromSheet              - Read value from worksheet
+'   [s] RegisterConfig                          - Register configuration item
+'   [f] ReadValueFromSheet                      - Read value from worksheet
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
 '       [F]=Public Function, [f]=Private Function, [T]=Type
@@ -398,7 +407,7 @@ End Function
 ' 返回          : Object - 初始化后的日志记录器对象
 ' Purpose       : Initializes project logger
 ' Contract      : Platform / Internal
-' Side Effects  : Modifies gLogger state
+' Side Effects  : None (returns new logger instance; state ownership consolidated to InitContext)
 ' ----------------------------------------------------------------------------------------------
 Private Function InitProjectLogger() As Object
     ' DO NOT call InitContext here (no hidden lifecycle decisions).
@@ -417,7 +426,7 @@ Private Function InitProjectLogger() As Object
     ' ---- config (DIRECT) ----
     ' NOTE: Must NOT call public GetConfigValue here because InitContext is still in progress.
     Dim enableSheet As Boolean
-    Dim enableImmediate As Boolean
+    Dim enableImmediate As Boolean  ' always enabled: Immediate window is dev-only; no runtime side effect
     Dim minLevel As String
     Dim logSheetName As String
     Dim anchorCell As String
@@ -441,7 +450,6 @@ Private Function InitProjectLogger() As Object
     Set lgr = New plat_logger
     Call lgr.Init(enableSheet, enableImmediate, minLevel, ws, anchorCell)
 
-    Set gLogger = lgr
     Set InitProjectLogger = lgr
 End Function
 
@@ -475,7 +483,7 @@ Private Function GetConfigDictionary( _
         RegisterConfig d, CFG_IS_SYS_ERROR_ENABLED, gWsMain, True
         RegisterConfig d, CFG_IS_LOG_WRITE_ENABLED, gWsMain, True
 
-        RegisterConfig d, CFG_STR_LOG_LEVEL, gWsLog, "MODULE"
+        RegisterConfig d, CFG_STR_LOG_LEVEL, gWsLog, "INFO"
         RegisterConfig d, CFG_STR_LOG_SHEET_NAME, gWsLog, "Log@SYS"
         RegisterConfig d, CFG_STR_LOG_ANCHOR_CELL, gWsLog, "B3"
 
@@ -517,7 +525,7 @@ End Function
 ' 返回          : Variant - 配置值或默认值
 ' Purpose       : Gets configuration value, returns default if key not found
 ' Contract      : Platform / Query-only
-' Side Effects  : None (query-only)
+' Side Effects  : May modify gConfig state (silent fallback on None)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetConfigValue(ByVal key As String, Optional ByVal defaultValue As Variant) As Variant
     EnsureContextReady
@@ -576,6 +584,10 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 Public Property Get Config() As Object
     EnsureContextReady
+    If gConfig Is Nothing Then
+        Err.Raise vbObjectError + 1401, "plat_context.Config", _
+                  "Config not initialized (unexpected)."
+    End If
     Set Config = gConfig
 End Property
 
@@ -666,11 +678,13 @@ End Function
 ' ----------------------------------------------------------------------------------------------
 Public Function GetRangeOrRaise(ByVal ws As Worksheet, ByVal nameOrAddress As String, _
                                Optional ByVal forceReload As Boolean = False) As Range
-    Set GetRangeOrRaise = GetRange(ws, nameOrAddress, forceReload)
-    If GetRangeOrRaise Is Nothing Then
+    Dim rng As Range
+    Set rng = GetRange(ws, nameOrAddress, forceReload)
+    If rng Is Nothing Then
         Err.Raise vbObjectError + 1500, "plat_context.GetRangeOrRaise", _
                   "Range not found: " & ws.Name & "!" & nameOrAddress
     End If
+    Set GetRangeOrRaise = rng
 End Function
 
 ' ----------------------------------------------------------------------------------------------
@@ -683,6 +697,8 @@ End Function
 ' 返回          : Variant - 范围值或默认值
 ' Purpose       : Gets range value, returns default on failure
 ' Contract      : Platform / Query-only
+'               : Caller is responsible for context readiness; this function depends only on
+'               : the caller-supplied ws and does not access module state directly
 ' Side Effects  : None (query-only)
 ' ----------------------------------------------------------------------------------------------
 Public Function GetRangeValue(ByVal ws As Worksheet, ByVal nameOrAddress As String, _
@@ -809,7 +825,7 @@ ContinueNext:
 End Sub
 
 ' ----------------------------------------------------------------------------------------------
-' [S] RegisterRanges
+' [s] RegisterRanges
 '
 ' 功能说明      : 注册范围（传统方法），基于硬编码的映射
 '               : DEPRECATED - keep legacy worksheet pairing for compatibility
@@ -819,7 +835,7 @@ End Sub
 ' Contract      : Platform / State mutation
 ' Side Effects  : Populates gRangeCache state
 ' ----------------------------------------------------------------------------------------------
-Public Sub RegisterRanges(Optional ByVal forceReload As Boolean = False)
+Private Sub RegisterRanges(Optional ByVal forceReload As Boolean = False)
     EnsureContextReady
 
     ' Legacy minimal set (fallback)

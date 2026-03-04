@@ -41,9 +41,15 @@ Attribute VB_Exposed = False
 '   - Fix (Anchor Safety): Added check for WsLog Nothing before setting pAnchor.
 '   - Refine (API Naming): Renamed convenience wrappers (Info/Warn/Err/LogDebug/Perf → InfoLog/WarnLog/ErrLog/DebugLog/PerfLog)
 '       to avoid shadowing VBA built-ins and improve call-site clarity.
+
+' v2.1.2
+'   - Clarify (Contract): Documented LevelRank normalization intent; caller-normalized input expected, internal UCase$/Trim$ retained as standalone safety guard.
+'   - Fix (Documentation): Corrected pMinLevel comment to reflect accurate severity order (DEBUG/INFO/PERF/WARN/ERROR with numeric ranks).
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
+' SECTION 00: MODULE STATE
+
 ' SECTION 01: INITIALIZATION
 '   [S] Init                                    - Initialize logger with configuration (enable sheet/immediate, min level, worksheet, anchor)
 '
@@ -71,7 +77,7 @@ Option Explicit
 
 Private pEnableSheet As Boolean
 Private pEnableImmediate As Boolean
-Private pMinLevel As String          ' "DEBUG"/"INFO"/"WARN"/"ERROR"/"PERF"
+Private pMinLevel As String          ' "DEBUG"(10) / "INFO"(20) / "PERF"(25) / "WARN"(30) / "ERROR"(40)
 Private pWs As Worksheet
 Private pAnchor As Range
 Private pNextRowOffset As Long
@@ -229,6 +235,8 @@ End Function
 ' 返回          : Long - 数值等级（DEBUG=10, INFO=20, PERF=25, WARN=30, ERROR=40）
 ' Purpose       : Converts log level string to numeric rank for comparison
 ' Contract      : Platform / Internal
+'               : Caller is expected to pass normalized level (UCase$/Trim$);
+'               : internal normalization retained for standalone safety
 ' Side Effects  : None (query-only)
 ' ----------------------------------------------------------------------------------------------
 Private Function LevelRank(ByVal level As String) As Long
