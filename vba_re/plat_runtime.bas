@@ -17,7 +17,7 @@ Attribute VB_Name = "plat_runtime"
 '                       Business layer must not mutate Application settings directly.
 '                     - Logging helpers route through plat_context.GetLogger() via late
 '                       binding; logging failures are suppressed and never raised to callers.
-' STATUS            : Frozen
+' STATUS            : In Development (not yet reviewed for Stable Candidate)
 ' ==============================================================================================
 ' VERSION HISTORY   :
 ' v1.0.0
@@ -62,6 +62,13 @@ Attribute VB_Name = "plat_runtime"
 '   - Align (SafeExecute Note): InitContext failure propagation documented as intentional fatal design boundary.
 '   - Align (GetFilePathFromDialog Note): No-guard policy documented; call site assumed interactive and UI-capable.
 '   - Fix (BuildErrorMessage Key Consistency): err_desc= key added to errDescription field; aligns with TryOnce context convention.
+
+' v2.2.0
+'   - Add (Architecture): Introduced SECTION 08 Session Teardown, absorbing all worksheet lifecycle management from app_06_ws (v1 script module).
+'   - Add (Contract): SessionTeardown / PurgeTempSheets / RefreshOutputSheetList adopt Boolean + ByRef errMsg contract; no MsgBox, no Raise.
+'   - Add (Config-Driven): Sheet action rules migrated from hardcoded string-matching to Setup-table lookup via p_ResolveSheetAction; extensible for v3.
+'   - Add (Safety): Permanent sheet guard enforced via p_IsPermanentSheet; logic centralized and not duplicated across callers.
+'   - Align (Ownership): plat_runtime is now the sole owner of Workbook structural mutations (sheet delete / archive); Business layer must not delete sheets.
 ' ==============================================================================================
 ' TABLE OF CONTENTS :
 '
@@ -108,6 +115,15 @@ Attribute VB_Name = "plat_runtime"
 '
 ' SECTION 07: PERF INSTRUMENTATION
 '   [S] MeasurePerf             - Perf start/end wrapper over core_logging.StartTimer / ElapsedTime / FormatElapsedTime
+
+' SECTION 08: SESSION TEARDOWN
+'   [F] SessionTeardown         - Archive and delete output sheets per config-driven action rules
+'   [F] PurgeTempSheets         - Delete all sheets matching TEMP_ prefix (safe, skips permanent)
+'   [F] RefreshOutputSheetList  - Refresh output sheet inventory in Setup anchor range
+'   [f] p_ResolveSheetAction    - Resolve action rule for a sheet name from Setup config table
+'   [f] p_ExecuteSheetAction    - Execute a single sheet action (archive-delete / delete / keep)
+'   [f] p_IsPermanentSheet      - Return True if sheet must never be deleted
+'   [f] p_EnsureArchiveSheet    - Return or create the Archive worksheet
 ' ==============================================================================================
 ' NOTE: [C]=Constant, [V]=Variable, [P]=Property, [S]=Public Sub, [s]=Private Sub,
 '       [F]=Public Function, [f]=Private Function, [T]=Type
@@ -868,3 +884,450 @@ Public Sub MeasurePerf( _
         LogPerf THIS_MODULE, procName, "perf=NA", "label=" & label
     End If
 End Sub
+
+' ==============================================================================================
+' SECTION 08: SESSION TEARDOWN
+' ==============================================================================================
+
+' ----------------------------------------------------------------------------------------------
+' [F] SessionTeardown
+'
+' 功能说明      : 会话结束后对输出工作表执行归档/删除/保留动作
+'               : 动作规则由 Setup 表配置区域驱动，不允许硬编码
+'               : 永久工作表（含 @ 标识或核心系统表）受安全锁保护，不参与处理
+' 参数          : errMsg  - 输出：失败时的错误说明
+' 返回          : Boolean - True=全部处理完成；False=至少一张表处理失败，errMsg 已填充
+' Purpose       : Post-session worksheet lifecycle management driven by Setup config rules
+' Contract      : Platform / Workbook mutation
+' Side Effects  : May delete worksheets; may create Archive sheet; writes to Log sheet via Logger
+' ----------------------------------------------------------------------------------------------
+Public Function SessionTeardown(ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
+    SessionTeardown = False
+
+    Dim wb As Workbook
+    Set wb = ThisWorkbook
+
+    Dim ws          As Worksheet
+    Dim wsName      As String
+    Dim action      As String
+    Dim failCount   As Long
+    Dim totalCount  As Long
+    Dim localErr    As String
+    Dim loopCount   As Long
+
+    Const MAX_SHEETS As Long = 200
+
+    LogInfo PLAT_LAYER, THIS_MODULE, "SessionTeardown", "Session teardown started"
+
+    For Each ws In wb.Worksheets
+        loopCount = loopCount + 1
+        If loopCount > MAX_SHEETS Then
+            LogWarn PLAT_LAYER, THIS_MODULE, "SessionTeardown", _
+                "sheet_count_exceeded_limit=" & MAX_SHEETS & ";teardown_truncated=true"
+            Exit For
+        End If
+
+        wsName = ws.Name
+
+        ' --- Permanent sheet guard: never touch these ---
+        If p_IsPermanentSheet(wsName) Then
+            LogInfo PLAT_LAYER, THIS_MODULE, "SessionTeardown", _
+                "sheet=" & wsName & ";verdict=permanent;skipped=true"
+            GoTo NextSheet
+        End If
+
+        ' --- Resolve action from config table ---
+        action = p_ResolveSheetAction(wsName)
+
+        ' --- Execute action ---
+        totalCount = totalCount + 1
+        localErr = vbNullString
+        If Not p_ExecuteSheetAction(wsName, action, localErr) Then
+            failCount = failCount + 1
+            If Len(errMsg) = 0 Then errMsg = localErr
+            LogError PLAT_LAYER, THIS_MODULE, "SessionTeardown", _
+                "sheet=" & wsName & ";action=" & action & ";err=" & localErr
+        End If
+
+NextSheet:
+    Next ws
+
+    If failCount > 0 Then
+        errMsg = THIS_MODULE & ".SessionTeardown: " & failCount & " of " & totalCount & _
+                 " sheets failed; first_err=" & errMsg
+        LogError PLAT_LAYER, THIS_MODULE, "SessionTeardown", errMsg
+        Exit Function
+    End If
+
+    LogInfo PLAT_LAYER, THIS_MODULE, "SessionTeardown", _
+        "teardown_complete;total_processed=" & totalCount
+    SessionTeardown = True
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [F] PurgeTempSheets
+'
+' 功能说明      : 删除所有以 TEMP_ 前缀命名的临时工作表
+'               : 永久工作表安全锁确保核心表不受影响
+' 参数          : errMsg       - 输出：失败时的错误说明
+' 返回          : Boolean - True=清理完成；False=至少一张表删除失败
+' Purpose       : Safe removal of all TEMP_-prefixed transient worksheets
+' Contract      : Platform / Workbook mutation
+' Side Effects  : May delete worksheets matching TEMP_ prefix
+' ----------------------------------------------------------------------------------------------
+Public Function PurgeTempSheets(ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
+    PurgeTempSheets = False
+
+    Const TEMP_PREFIX As String = "TEMP_"
+    Const MAX_SHEETS  As Long = 200
+
+    Dim wb          As Workbook
+    Dim ws          As Worksheet
+    Dim toDelete()  As String
+    Dim count       As Long
+    Dim i           As Long
+    Dim loopCount   As Long
+
+    Set wb = ThisWorkbook
+    count = 0
+    ReDim toDelete(0 To MAX_SHEETS - 1)
+
+    ' --- Collect candidates in first pass (avoid mutating collection mid-loop) ---
+    For Each ws In wb.Worksheets
+        loopCount = loopCount + 1
+        If loopCount > MAX_SHEETS Then Exit For
+        If InStr(1, ws.Name, TEMP_PREFIX, vbTextCompare) > 0 Then
+            If Not p_IsPermanentSheet(ws.Name) Then
+                toDelete(count) = ws.Name
+                count = count + 1
+            End If
+        End If
+    Next ws
+
+    If count = 0 Then
+        LogInfo PLAT_LAYER, THIS_MODULE, "PurgeTempSheets", "no_temp_sheets_found"
+        PurgeTempSheets = True
+        Exit Function
+    End If
+
+    ' --- Delete in second pass ---
+    Dim failCount As Long
+    failCount = 0
+
+    For i = 0 To count - 1
+        Dim localErr As String
+        localErr = vbNullString
+        If Not p_ExecuteSheetAction(toDelete(i), "Delete", localErr) Then
+            failCount = failCount + 1
+            If Len(errMsg) = 0 Then errMsg = localErr
+        End If
+    Next i
+
+    If failCount > 0 Then
+        errMsg = THIS_MODULE & ".PurgeTempSheets: " & failCount & " of " & count & _
+                 " deletions failed; first_err=" & errMsg
+        LogError PLAT_LAYER, THIS_MODULE, "PurgeTempSheets", errMsg
+        Exit Function
+    End If
+
+    LogInfo PLAT_LAYER, THIS_MODULE, "PurgeTempSheets", _
+        "purge_complete;deleted=" & count
+    PurgeTempSheets = True
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [F] RefreshOutputSheetList
+'
+' 功能说明      : 扫描当前 Workbook 所有非永久工作表，将名称写入 Setup 表的锚点区域
+'               : 用于在 Python 运行后刷新 UI 列表，供用户查看输出表清单
+' 参数          : errMsg       - 输出：失败时的错误说明
+' 返回          : Boolean - True=刷新成功；False=失败，errMsg 已填充
+' Purpose       : Refresh output sheet inventory written to Setup anchor range
+' Contract      : Platform / Workbook read + Setup sheet write
+' Side Effects  : Writes sheet names to Setup worksheet anchor range
+' ----------------------------------------------------------------------------------------------
+Public Function RefreshOutputSheetList(ByRef errMsg As String) As Boolean
+    errMsg = vbNullString
+    RefreshOutputSheetList = False
+
+    Const MAX_ROWS    As Long = 200
+    Const MAX_SHEETS  As Long = 200
+
+    Dim anchorRange   As Range
+    Dim ws            As Worksheet
+    Dim rowIdx        As Long
+    Dim loopCount     As Long
+
+    ' --- Resolve anchor range from context ---
+    On Error Resume Next
+    Set anchorRange = plat_context.GetRange("rng_out_ws_list_anchor", errMsg)
+    On Error GoTo 0
+
+    If anchorRange Is Nothing Then
+        errMsg = THIS_MODULE & ".RefreshOutputSheetList: anchor range not found [rng_out_ws_list_anchor]"
+        LogError PLAT_LAYER, THIS_MODULE, "RefreshOutputSheetList", errMsg
+        Exit Function
+    End If
+
+    ' --- Clear existing content ---
+    On Error Resume Next
+    anchorRange.Resize(MAX_ROWS, 1).ClearContents
+    On Error GoTo 0
+
+    rowIdx = 0
+
+    For Each ws In ThisWorkbook.Worksheets
+        loopCount = loopCount + 1
+        If loopCount > MAX_SHEETS Then Exit For
+
+        If Not p_IsPermanentSheet(ws.Name) Then
+            If rowIdx >= MAX_ROWS Then
+                LogWarn PLAT_LAYER, THIS_MODULE, "RefreshOutputSheetList", _
+                    "max_rows_reached=" & MAX_ROWS & ";list_truncated=true"
+                Exit For
+            End If
+            anchorRange.Offset(rowIdx, 0).Value = ws.Name
+            rowIdx = rowIdx + 1
+        End If
+    Next ws
+
+    LogInfo PLAT_LAYER, THIS_MODULE, "RefreshOutputSheetList", _
+        "refresh_complete;listed=" & rowIdx
+    RefreshOutputSheetList = True
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] p_ResolveSheetAction
+'
+' 功能说明      : 从 Setup 表配置区域读取工作表名称对应的处理动作
+'               : 若未找到匹配规则，默认返回 "Keep"（安全保守策略）
+'               : 配置区域：Named Range "rng_sys_ws_action_rules"（两列：SheetPattern, Action）
+' 参数          : sheetName - 工作表名称
+' 返回          : String - "ArchiveDelete" / "Delete" / "Keep"（默认 "Keep"）
+' Purpose       : Config-driven sheet action resolver; extensible for v3 output types
+' ----------------------------------------------------------------------------------------------
+Private Function p_ResolveSheetAction(ByVal sheetName As String) As String
+    p_ResolveSheetAction = "Keep"   ' safe default
+
+    Dim rulesRange  As Range
+    Dim rules       As Variant
+    Dim i           As Long
+    Dim pattern     As String
+    Dim action      As String
+    Dim ignored     As String
+
+    ' --- Load rules table from named range ---
+    On Error Resume Next
+    Set rulesRange = plat_context.GetRange("rng_sys_ws_action_rules", ignored)
+    On Error GoTo 0
+
+    If rulesRange Is Nothing Then
+        ' No rules table configured: default Keep for all non-permanent sheets
+        LogWarn PLAT_LAYER, THIS_MODULE, "p_ResolveSheetAction", _
+            "rules_range_missing=rng_sys_ws_action_rules;default=Keep;sheet=" & sheetName
+        Exit Function
+    End If
+
+    rules = rulesRange.Value
+
+    If Not IsArray(rules) Then Exit Function
+
+    ' --- Scan rules: first match wins ---
+    For i = LBound(rules, 1) To UBound(rules, 1)
+        pattern = Trim$(CStr(rules(i, 1)))
+        action  = Trim$(CStr(rules(i, 2)))
+
+        If Len(pattern) = 0 Then GoTo NextRule
+
+        If InStr(1, sheetName, pattern, vbTextCompare) > 0 Then
+            Select Case UCase$(action)
+                Case "ARCHIVEDELETE", "ARCHIVE_DELETE", "APPEND_DELETE"
+                    p_ResolveSheetAction = "ArchiveDelete"
+                Case "DELETE"
+                    p_ResolveSheetAction = "Delete"
+                Case Else
+                    p_ResolveSheetAction = "Keep"
+            End Select
+            Exit Function
+        End If
+
+NextRule:
+    Next i
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] p_ExecuteSheetAction
+'
+' 功能说明      : 对指定工作表执行单项动作（归档删除 / 直接删除 / 保留）
+'               : 归档动作：将数据追加写入 Archive 表后删除源表
+'               : 删除动作：关闭 DisplayAlerts 后直接删除
+'               : 保留动作：仅记录日志，不做任何修改
+' 参数          : sheetName - 工作表名称
+'               : action    - "ArchiveDelete" / "Delete" / "Keep"
+'               : errMsg    - 输出：失败时的错误说明
+' 返回          : Boolean - True=执行成功；False=执行失败，errMsg 已填充
+' ----------------------------------------------------------------------------------------------
+Private Function p_ExecuteSheetAction(ByVal sheetName As String, _
+                                      ByVal action     As String, _
+                                      ByRef errMsg     As String) As Boolean
+    errMsg = vbNullString
+    p_ExecuteSheetAction = False
+
+    Dim ws          As Worksheet
+    Dim archiveWs   As Worksheet
+    Dim archiveErr  As String
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        errMsg = THIS_MODULE & ".p_ExecuteSheetAction: sheet not found [" & sheetName & "]"
+        LogWarn PLAT_LAYER, THIS_MODULE, "p_ExecuteSheetAction", errMsg
+        Exit Function
+    End If
+
+    Select Case UCase$(action)
+
+        Case "ARCHIVEDELETE"
+            ' --- Step 1: Ensure Archive sheet exists ---
+            archiveErr = vbNullString
+            Set archiveWs = p_EnsureArchiveSheet(archiveErr)
+            If archiveWs Is Nothing Then
+                errMsg = THIS_MODULE & ".p_ExecuteSheetAction: cannot get archive sheet;" & archiveErr
+                Exit Function
+            End If
+
+            ' --- Step 2: Append source data to Archive ---
+            Dim srcRange    As Range
+            Dim destCell    As Range
+            Dim lastArchRow As Long
+
+            On Error Resume Next
+            Set srcRange = ws.UsedRange
+            On Error GoTo 0
+
+            If srcRange Is Nothing Then
+                LogWarn PLAT_LAYER, THIS_MODULE, "p_ExecuteSheetAction", _
+                    "sheet=" & sheetName & ";used_range_empty;archive_skipped"
+            Else
+                On Error Resume Next
+                lastArchRow = archiveWs.Cells(archiveWs.Rows.Count, 1).End(xlUp).Row
+                If lastArchRow < 1 Then lastArchRow = 1
+                Set destCell = archiveWs.Cells(lastArchRow + 1, 1)
+                srcRange.Copy destCell
+                On Error GoTo 0
+            End If
+
+            LogInfo PLAT_LAYER, THIS_MODULE, "p_ExecuteSheetAction", _
+                "sheet=" & sheetName & ";action=archive_copy_done"
+
+            ' --- Step 3: Delete source sheet ---
+            On Error Resume Next
+            Application.DisplayAlerts = False
+            ws.Delete
+            Application.DisplayAlerts = True
+            Dim delErr As String
+            delErr = Err.Description
+            On Error GoTo 0
+
+            If Len(delErr) > 0 Then
+                errMsg = THIS_MODULE & ".p_ExecuteSheetAction: delete_after_archive_failed;" & _
+                         "sheet=" & sheetName & ";err=" & delErr
+                Exit Function
+            End If
+
+            LogInfo PLAT_LAYER, THIS_MODULE, "p_ExecuteSheetAction", _
+                "sheet=" & sheetName & ";action=archive_delete_done"
+
+        Case "DELETE"
+            On Error Resume Next
+            Application.DisplayAlerts = False
+            ws.Delete
+            Application.DisplayAlerts = True
+            Dim delErr2 As String
+            delErr2 = Err.Description
+            On Error GoTo 0
+
+            If Len(delErr2) > 0 Then
+                errMsg = THIS_MODULE & ".p_ExecuteSheetAction: direct_delete_failed;" & _
+                         "sheet=" & sheetName & ";err=" & delErr2
+                Exit Function
+            End If
+
+            LogInfo PLAT_LAYER, THIS_MODULE, "p_ExecuteSheetAction", _
+                "sheet=" & sheetName & ";action=delete_done"
+
+        Case Else
+            ' Keep - no mutation, log only
+            LogInfo PLAT_LAYER, THIS_MODULE, "p_ExecuteSheetAction", _
+                "sheet=" & sheetName & ";action=keep"
+
+    End Select
+
+    p_ExecuteSheetAction = True
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] p_IsPermanentSheet
+'
+' 功能说明      : 判定工作表是否为永久保护表（永远不应被删除）
+'               : 判定条件：名称含 @ 标识，或为系统核心表（Setup / Main / Log / Archive）
+' 参数          : sheetName - 工作表名称
+' 返回          : Boolean - True=永久表，不可删除；False=非永久表
+' Purpose       : Centralized permanent sheet guard; single source of truth for all callers
+' ----------------------------------------------------------------------------------------------
+Private Function p_IsPermanentSheet(ByVal sheetName As String) As Boolean
+    If InStr(1, sheetName, "@", vbTextCompare) > 0 Then
+        p_IsPermanentSheet = True
+        Exit Function
+    End If
+
+    Select Case LCase$(Trim$(sheetName))
+        Case "setup", "main", "log", "archive", "treaty", "sublob"
+            p_IsPermanentSheet = True
+        Case Else
+            p_IsPermanentSheet = False
+    End Select
+End Function
+
+' ----------------------------------------------------------------------------------------------
+' [f] p_EnsureArchiveSheet
+'
+' 功能说明      : 返回 Archive 工作表对象；若不存在则自动创建并追加至末尾
+' 参数          : errMsg - 输出：失败时的错误说明
+' 返回          : Worksheet - Archive 工作表对象；失败时返回 Nothing
+' Purpose       : Guarantee Archive sheet availability before archive-delete operations
+' ----------------------------------------------------------------------------------------------
+Private Function p_EnsureArchiveSheet(ByRef errMsg As String) As Worksheet
+    errMsg = vbNullString
+
+    Const ARCHIVE_NAME As String = "Archive"
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(ARCHIVE_NAME)
+    On Error GoTo 0
+
+    If Not ws Is Nothing Then
+        Set p_EnsureArchiveSheet = ws
+        Exit Function
+    End If
+
+    ' --- Create Archive sheet ---
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    If Not ws Is Nothing Then ws.Name = ARCHIVE_NAME
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        errMsg = THIS_MODULE & ".p_EnsureArchiveSheet: failed to create Archive sheet"
+        LogError PLAT_LAYER, THIS_MODULE, "p_EnsureArchiveSheet", errMsg
+        Exit Function
+    End If
+
+    LogInfo PLAT_LAYER, THIS_MODULE, "p_EnsureArchiveSheet", "archive_sheet_created"
+    Set p_EnsureArchiveSheet = ws
+End Function
